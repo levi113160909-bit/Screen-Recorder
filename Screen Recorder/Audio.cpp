@@ -139,20 +139,15 @@ void AudioSource::Process(const BYTE* data, UINT32 frames, bool silent)
 {
     std::vector<float> out;
     out.reserve((size_t)(frames / m_step + 4) * CHANNELS);
-    float peak = 0.0f;
-
-    // علو الصوت: 0 = سكوت ، 1 = طبيعي ، 2 = ضعفين. والكتم = صفر
-    const float gain = m_muted ? 0.0f : m_volume.load();
 
     for (UINT32 f = 0; f < frames; ++f)
     {
         float l = 0.0f, r = 0.0f;
         if (!silent)
         {
-            l = SampleAt(data, f, 0) * gain;
-            r = (m_srcChannels > 1 ? SampleAt(data, f, 1) : SampleAt(data, f, 0)) * gain;   // مايك مونو -> منكرّر القناة
+            l = SampleAt(data, f, 0);
+            r = m_srcChannels > 1 ? SampleAt(data, f, 1) : l;   // مايك مونو -> منكرّر القناة
         }
-        peak = std::max(peak, std::max(std::fabs(l), std::fabs(r)));
 
         // تحويل السرعة لـ 48000 (بالتوسيط بين كل عينتين)
         while (m_phase < 1.0)
@@ -166,6 +161,17 @@ void AudioSource::Process(const BYTE* data, UINT32 frames, bool silent)
         m_prevR = r;
     }
 
+    // الفلاتر (قبل العلو، لحتى البوابة تشتغل على صوتك الحقيقي)
+    m_filters.Process(out.data(), out.size() / CHANNELS);
+
+    // علو الصوت: 0 = سكوت ، 1 = طبيعي ، 2 = ضعفين. والكتم = صفر
+    const float gain = m_muted ? 0.0f : m_volume.load();
+    float peak = 0.0f;
+    for (float& v : out)
+    {
+        v *= gain;
+        peak = std::max(peak, std::fabs(v));
+    }
     if (peak > m_peak.load())
         m_peak = peak;
 

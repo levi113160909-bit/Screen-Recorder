@@ -1,7 +1,8 @@
-﻿// =============================================================
+// =============================================================
 //  Gpu.cpp - التصوير والتركيب على كرت الشاشة
 // =============================================================
 #include "Gpu.h"
+#include "Media.h"
 
 #include <unknwn.h>
 #include <d3d11.h>
@@ -93,6 +94,17 @@ struct GpuCompositor::Impl
 
     std::map<int, std::unique_ptr<Source>> sources;    // لكل طبقة مصدر
 
+    // صور الكاميرا/الصورة/النص على كرت الشاشة
+    struct MediaBitmap { unsigned long long version = 0; ComPtr<ID2D1Bitmap1> bitmap; int w = 0, h = 0; };
+    std::map<int, MediaBitmap> media;
+
+    // الانتقال: نسخة مجمّدة من آخر صورة للمشهد القديم
+    unsigned                fadeId = 0;
+    bool                    haveFrame = false;
+    ComPtr<ID3D11Texture2D> frozen;
+    ComPtr<ID2D1Bitmap1>    frozenBitmap;
+    bool                    frozenValid = false;
+
     bool Init()
     {
         const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1 };
@@ -160,7 +172,115 @@ struct GpuCompositor::Impl
 
         canvasW = w;
         canvasH = h;
+        haveFrame = false;
+        frozen.Reset();
+        frozenBitmap.Reset();
+        frozenValid = false;
         return true;
+    }
+
+    // منجمّد الصورة الحالية (قبل ما نرسم المشهد الجديد)
+    void Freeze()
+    {
+        frozenValid = false;
+        if (!frozen)
+        {
+            D3D11_TEXTURE2D_DESC d{};
+            canvas->GetDesc(&d);
+            d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            d.Usage = D3D11_USAGE_DEFAULT;
+            d.CPUAccessFlags = 0;
+            if (FAILED(device->CreateTexture2D(&d, nullptr, &frozen)))
+                return;
+            ComPtr<IDXGISurface> surface;
+            frozen.As(&surface);
+            const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            if (FAILED(dc->CreateBitmapFromDxgiSurface(surface.Get(), &props, &frozenBitmap)))
+            {
+                frozen.Reset();
+                return;
+            }
+        }
+        context->CopyResource(frozen.Get(), canvas.Get());
+        frozenValid = true;
+    }
+
+    // رسم الكاميرا/الصورة/النص
+    void DrawMedia(const SceneLayer& l, const D2D1_RECT_F& dst, std::vector<int>* lostIds)
+    {
+    if (!l.visible)        // مخفية: ما منفتح الكاميرا أصلاً (بينطفى ضوّها)
+        return;
+        bool missing = false;
+        std::shared_ptr<const MediaFrame> f = GetLayerFrame(l, &missing);
+        if (missing && lostIds)
+            lostIds->push_back(l.id);
+        if (!l.visible || !f || f->width <= 0 || f->height <= 0)
+            return;
+
+        MediaBitmap& m = media[l.id];
+        if (!m.bitmap || m.version != f->version)
+        {
+            if (!m.bitmap || m.w != f->width || m.h != f->height)
+            {
+                m.bitmap.Reset();
+                const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                if (FAILED(dc->CreateBitmap(D2D1::SizeU(f->width, f->height), f->pixels.data(), f->width * 4, &props, &m.bitmap)))
+                    return;
+                m.w = f->width;
+                m.h = f->height;
+            }
+            else
+                m.bitmap->CopyFromMemory(nullptr, f->pixels.data(), f->width * 4);
+            m.version = f->version;
+        }
+
+        const float dw = dst.right - dst.left, dh = dst.bottom - dst.top;
+        if (dw <= 0 || dh <= 0)
+            return;
+
+        // الجزء اللي منرسمه من الصورة (الكاميرا: منقص لتملا المكان بدون مط)
+        float sx = 0, sy = 0, sw = (float)m.w, sh = (float)m.h;
+        if (l.kind == LayerKind::Camera)
+        {
+            const float dstAspect = dw / dh, srcAspect = (float)m.w / m.h;
+            if (srcAspect > dstAspect) { sw = m.h * dstAspect; sx = (m.w - sw) / 2; }
+            else                       { sh = m.w / dstAspect; sy = (m.h - sh) / 2; }
+        }
+
+        const bool mirror = l.kind == LayerKind::Camera && l.mirror;
+        if (l.shape == SHAPE_RECT && !mirror)
+        {
+            const D2D1_RECT_F src = D2D1::RectF(sx, sy, sx + sw, sy + sh);
+            const float scale = dw / sw;
+            dc->DrawBitmap(m.bitmap.Get(), &dst, 1.0f,
+                           scale < 0.75f ? D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC : D2D1_INTERPOLATION_MODE_LINEAR,
+                           &src, nullptr);
+            return;
+        }
+
+        // شكل (دائرة / زوايا مدوّرة) أو مراية: منرسم بفرشاة من الصورة
+        ComPtr<ID2D1BitmapBrush1> brush;
+        if (FAILED(dc->CreateBitmapBrush(m.bitmap.Get(), &brush)))
+            return;
+        brush->SetInterpolationMode1(D2D1_INTERPOLATION_MODE_LINEAR);
+        const float kx = dw / sw, ky = dh / sh;
+        D2D1::Matrix3x2F t = D2D1::Matrix3x2F::Translation(-sx, -sy) * D2D1::Matrix3x2F::Scale(kx, ky);
+        if (mirror)
+            t = t * D2D1::Matrix3x2F::Scale(-1, 1) * D2D1::Matrix3x2F::Translation(dw, 0);
+        t = t * D2D1::Matrix3x2F::Translation(dst.left, dst.top);
+        brush->SetTransform(t);
+
+        if (l.shape == SHAPE_CIRCLE)
+            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F((dst.left + dst.right) / 2, (dst.top + dst.bottom) / 2), dw / 2, dh / 2), brush.Get());
+        else if (l.shape == SHAPE_ROUNDED)
+        {
+            const float r = std::min(dw, dh) * 0.12f;
+            dc->FillRoundedRectangle(D2D1::RoundedRect(dst, r, r), brush.Get());
+        }
+        else
+            dc->FillRectangle(dst, brush.Get());
     }
 
     // منفتح جلسة تصوير لمصدر جديد
@@ -253,9 +373,10 @@ struct GpuCompositor::Impl
         latest.Close();
     }
 
-    bool Compose(const std::vector<SceneLayer>& layers, int cw, int ch,
-                 BYTE* out, int outW, int outH, int stride, bool bottomUp, std::vector<int>* lostIds)
+    bool Compose(const std::vector<SceneLayer>& layers, int cw, int ch, const ComposeParams& p)
     {
+        const int outW = p.outW, outH = p.outH;
+        std::vector<int>* lostIds = p.lostIds;
         if (!EnsureCanvas(outW, outH))
             return false;
 
@@ -264,17 +385,58 @@ struct GpuCompositor::Impl
         {
             bool exists = false;
             for (const SceneLayer& l : layers)
-                if (l.id == it->first) { exists = true; break; }
+                if (l.id == it->first && l.kind == LayerKind::Capture) { exists = true; break; }
             it = exists ? std::next(it) : sources.erase(it);
         }
+        for (auto it = media.begin(); it != media.end();)
+        {
+            bool exists = false;
+            for (const SceneLayer& l : layers)
+                if (l.id == it->first && l.kind != LayerKind::Capture) { exists = true; break; }
+            it = exists ? std::next(it) : media.erase(it);
+        }
+
+        // تبديل مشهد: منجمّد آخر صورة من القديم لحتى نعمل تلاشي منها
+        if (p.fade.id != fadeId)
+        {
+            fadeId = p.fade.id;
+            if (haveFrame && p.fade.progress < 1)
+                Freeze();
+            else
+                frozenValid = false;
+        }
+        if (p.fade.progress >= 1)
+            frozenValid = false;
+        const bool fading = frozenValid && p.fade.progress < 1;
 
         dc->SetTarget(canvasTarget.Get());
         dc->BeginDraw();
         dc->Clear(D2D1::ColorF(0, 0, 0, 1));
 
-        const float sx = (float)outW / cw, sy = (float)outH / ch;
+        if (fading)
+        {
+            dc->DrawBitmap(frozenBitmap.Get(), nullptr, 1.0f, D2D1_INTERPOLATION_MODE_LINEAR, nullptr, nullptr);
+            dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::IdentityMatrix(), p.fade.progress), nullptr);
+            ComPtr<ID2D1SolidColorBrush> black;
+            dc->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &black);
+            dc->FillRectangle(D2D1::RectF(0, 0, (float)outW, (float)outH), black.Get());
+        }
+
+        // أي جزء من اللوحة منرسم
+        const double vx = p.viewW > 0 ? p.viewX : 0, vy = p.viewW > 0 ? p.viewY : 0;
+        const double vw = p.viewW > 0 ? p.viewW : cw, vh = p.viewH > 0 ? p.viewH : ch;
+        const float sx = (float)(outW / vw), sy = (float)(outH / vh);
         for (const SceneLayer& l : layers)
         {
+            const D2D1_RECT_F dst = D2D1::RectF((float)(l.x - vx) * sx, (float)(l.y - vy) * sy,
+                                                (float)(l.x - vx + l.w) * sx, (float)(l.y - vy + l.h) * sy);
+            if (l.kind != LayerKind::Capture)
+            {
+                DrawMedia(l, dst, lostIds);
+                continue;
+            }
+
             auto& src = sources[l.id];
             bool fresh = false;
             if (!src || !SameTarget(src->target, l.target))    // جديد، أو النافذة رجعت انفتحت
@@ -309,14 +471,16 @@ struct GpuCompositor::Impl
                     continue;
             }
 
-            const D2D1_RECT_F dst = D2D1::RectF((float)l.x * sx, (float)l.y * sy,
-                                                (float)(l.x + l.w) * sx, (float)(l.y + l.h) * sy);
             // تصغير كبير = فلتر أنعم (أبطأ شوي) ، غير هيك فلتر سريع
             const float scale = (dst.right - dst.left) / src->cacheW;
             dc->DrawBitmap(src->bitmap.Get(), &dst, 1.0f,
                            scale < 0.75f ? D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC : D2D1_INTERPOLATION_MODE_LINEAR,
                            nullptr, nullptr);
         }
+
+        if (fading)
+            dc->PopLayer();
+        haveFrame = true;
 
         if (FAILED(dc->EndDraw()))
             return false;
@@ -330,7 +494,7 @@ struct GpuCompositor::Impl
         for (int y = 0; y < outH; ++y)
         {
             const BYTE* srcRow = (const BYTE*)map.pData + (size_t)y * map.RowPitch;
-            BYTE*       dstRow = out + (size_t)(bottomUp ? (outH - 1 - y) : y) * stride;
+            BYTE*       dstRow = p.out + (size_t)(p.bottomUp ? (outH - 1 - y) : y) * p.stride;
             memcpy(dstRow, srcRow, (size_t)outW * 4);
         }
         context->Unmap(staging.Get(), 0);
@@ -360,12 +524,11 @@ std::unique_ptr<GpuCompositor> GpuCompositor::Create(bool captureCursor)
 
 GpuCompositor::~GpuCompositor() = default;
 
-bool GpuCompositor::Compose(const std::vector<SceneLayer>& layers, int canvasW, int canvasH,
-                            BYTE* out, int outW, int outH, int stride, bool bottomUp, std::vector<int>* lostIds)
+bool GpuCompositor::Compose(const std::vector<SceneLayer>& layers, int canvasW, int canvasH, const ComposeParams& params)
 {
     try
     {
-        return m->Compose(layers, canvasW, canvasH, out, outW, outH, stride, bottomUp, lostIds);
+        return m->Compose(layers, canvasW, canvasH, params);
     }
     catch (...)
     {

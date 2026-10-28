@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "AudioFilters.h"
 
 // جهاز صوت (سماعة أو ميكروفون)
 struct AudioDevice
@@ -52,6 +53,9 @@ public:
     void  SetMuted(bool m)   { m_muted = m; }
     bool  IsMuted() const    { return m_muted; }
 
+    // فلاتر الصوت (للمايك): إزالة الضجيج ، البوابة ، توحيد العلو
+    MicFilters& Filters() { return m_filters; }
+
     // اختيار الجهاز: id فاضي = الجهاز الافتراضي بويندوز
     void         SetDeviceId(const std::wstring& id) { m_deviceId = id; }
     std::wstring DeviceId() const { return m_deviceId; }
@@ -79,6 +83,7 @@ private:
     std::atomic<float> m_volume{ 1.0f };
     std::atomic<bool>  m_muted{ false };
     std::thread        m_thread;
+    MicFilters         m_filters;
 
     struct Tap
     {

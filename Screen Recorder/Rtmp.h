@@ -36,6 +36,7 @@ struct StreamTarget
     std::wstring url;                  // عنوان السيرفر (rtmp:// أو rtmps://)
     std::wstring key;                  // مفتاح البث (سرّي!)
     bool         enabled = true;
+    bool         vertical = false;     // بث عمودي 9:16 (تيك توك)
 };
 
 enum class OutputState { Idle, Connecting, Live, Reconnecting, Failed };

@@ -28,12 +28,15 @@
 #include "Audio.h"
 #include "Recorder.h"
 #include "Streamer.h"
+#include "Media.h"
+#include <commdlg.h>
 #include <wincrypt.h>
 #include <wincodec.h>
 
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "shell32.lib")
@@ -80,6 +83,12 @@ namespace Icon
     const wchar_t* Chevron = L"\uE70D";
     const wchar_t* Live    = L"\uE93E";
     const wchar_t* More    = L"\uE712";
+    const wchar_t* Camera  = L"\uE722";
+    const wchar_t* Photo   = L"\uEB9F";
+    const wchar_t* Font    = L"\uE8D2";
+    const wchar_t* Replay  = L"\uE81C";
+    const wchar_t* Filter  = L"\uE9E9";
+    const wchar_t* Close   = L"\uE711";
 }
 
 // أرقام العناصر اللي بتنكبس
@@ -91,11 +100,15 @@ enum : int
     ID_BITRATE_MINUS, ID_BITRATE_PLUS, ID_ADD_SCENE,
     ID_SYSTEM_MUTE, ID_MIC_MUTE, ID_SYSTEM_VOL, ID_MIC_VOL,
     ID_STREAM, ID_ADD_TARGET, ID_STREAM_KBPS_MINUS, ID_STREAM_KBPS_PLUS,
+    ID_REPLAY, ID_REPLAY_STOP, ID_MIC_FILTERS,
     ID_CANVAS_FIRST  = 90,      // 4 خيارات
     ID_FPS_FIRST     = 100,     // 4 خيارات
     ID_QUALITY_FIRST = 110,     // 4 خيارات
     ID_CONTAINER_FIRST = 130,   // خيارين
     ID_STREAM_RES_FIRST = 140,  // 3 خيارات (دقة البث)
+    ID_REPLAY_SEC_FIRST = 150,  // 4 خيارات (مدة الإعادة)
+    ID_TRANSITION_FIRST = 160,  // 3 خيارات (الانتقال بين المشاهد)
+    ID_VERTICAL_FIRST   = 170,  // خيارين (طريقة البث العمودي)
     ID_LAYER_FIRST   = 1000,    // الطبقة رقم id = ID_LAYER_FIRST + id
     ID_EYE_FIRST     = 3000,
     ID_DELETE_FIRST  = 5000,
@@ -105,7 +118,7 @@ enum : int
 };
 
 constexpr UINT_PTR TIMER_FRAME = 1;
-constexpr int      HOTKEY_RECORD = 1, HOTKEY_PAUSE = 2, HOTKEY_STREAM = 3;
+constexpr int      HOTKEY_RECORD = 1, HOTKEY_PAUSE = 2, HOTKEY_STREAM = 3, HOTKEY_REPLAY = 4;
 
 // =============================================================
 //  متغيرات البرنامج
@@ -165,6 +178,23 @@ std::vector<int>          g_liveTargets;        // أرقام الوجهات ا�
 std::vector<OutputStatus> g_streamStatus;       // حالة كل وجهة شغّالة
 int                       g_streamRes  = 1;     // 0 = بحجم اللوحة ، 1 = 1080p ، 2 = 720p
 UINT32                    g_streamKbps = 6000;  // معدّل البت للبث (كيلوبت/ث)
+int                       g_verticalMode = 0;   // البث العمودي: 0 قصّ المنتصف ، 1 الشاشة كاملة
+
+// الإعادة (آخر ثواني بالذاكرة)
+Streamer                      g_replay;
+std::shared_ptr<ReplayBuffer> g_replayBuffer = std::make_shared<ReplayBuffer>();
+bool                          g_replayWanted = false;      // كانت شغّالة آخر مرة؟ (منرجّع نشغّلها)
+int                           g_replayChoice = 1;
+const int                     REPLAY_SECONDS[] = { 15, 30, 60, 120 };
+
+// الانتقال بين المشاهد
+int       g_transitionChoice = 1;                          // 0 فوري ، 1 تلاشي سريع ، 2 تلاشي ناعم
+const int TRANSITION_MS[]    = { 0, 300, 700 };
+int       g_fadeTicks = 0;                                 // وقت التلاشي: منحدّث المعاينة أسرع
+
+// منطقة الكبس المسموحة (للقوائم اللي بتتمرّر: ما منخلّي شي مخفي ينكبس)
+bool        g_hitClipOn = false;
+D2D1_RECT_F g_hitClip{};
 
 // التسجيل
 Recorder     g_recorder;
@@ -202,6 +232,8 @@ std::vector<Recorder::EncoderInfo> g_encoders;
 std::wstring g_settingsPath;
 
 void SaveSettings();   // معرّفة تحت
+void SaveScenes();
+void RestartReplayIfActive();
 
 // في شي شغّال (تسجيل أو بث)؟ وقتها منقفل الإعدادات اللي بتأثّر عليهم
 bool Busy() { return g_recorder.IsRecording() || g_streamer.IsActive(); }
@@ -247,8 +279,18 @@ D2D1_COLOR_F WithAlpha(D2D1_COLOR_F c, float a) { c.a = a; return c; }
 // بيسجّل زر، وبيرجّع إذا الماوس فوقه
 bool AddHit(const D2D1_RECT_F& r, int id)
 {
-    g_hits.push_back({ r, id });
-    return Inside(r, g_mouse);
+    D2D1_RECT_F rr = r;
+    if (g_hitClipOn)
+    {
+        rr.left   = std::max(rr.left, g_hitClip.left);
+        rr.top    = std::max(rr.top, g_hitClip.top);
+        rr.right  = std::min(rr.right, g_hitClip.right);
+        rr.bottom = std::min(rr.bottom, g_hitClip.bottom);
+        if (rr.right <= rr.left || rr.bottom <= rr.top)
+            return false;
+    }
+    g_hits.push_back({ rr, id });
+    return Inside(rr, g_mouse);
 }
 
 // خط نص: rtl = من اليمين لليسار
@@ -849,10 +891,19 @@ int FindLayer(int id)     // لازم يكون القفل ممسوك
 }
 
 // مكان الطبقة: "ملاءمة" = أكبر حجم بيوسع بدون ما يتمطّ، بالنص
+// الحجم الطبيعي لأي طبقة (الشاشة/النافذة ، الكاميرا ، الصورة ، النص)
+bool LayerNaturalSize(const SceneLayer& l, int& w, int& h)
+{
+    const bool ok = l.kind == LayerKind::Capture ? GetCaptureSize(l.target, w, h) : MediaNaturalSize(l, w, h);
+    if (ok && l.kind == LayerKind::Camera && l.shape == SHAPE_CIRCLE)
+        w = h = std::min(w, h);              // الدائرة مربّعة
+    return ok && w > 0 && h > 0;
+}
+
 void FitLayer(SceneLayer& l, int cw, int ch)
 {
     int sw = 0, sh = 0;
-    if (!GetCaptureSize(l.target, sw, sh))
+    if (!LayerNaturalSize(l, sw, sh))
     {
         sw = cw;
         sh = ch;
@@ -873,6 +924,67 @@ void AddLayer(const CaptureTarget& target)
     FitLayer(l, g_scene.canvasW, g_scene.canvasH);
     g_scene.layers.push_back(l);          // الجديدة فوق الكل
     g_selectedLayer = l.id;
+}
+
+// كاميرا / صورة / نص: منحطّها بمكان منطقي حسب نوعها
+void AddMediaLayer(SceneLayer l)
+{
+    int nw = 0, nh = 0;
+    if (!LayerNaturalSize(l, nw, nh))       // برّا القفل (الكاميرا بتاخد لحظة لتفتح)
+    {
+        nw = 1280;
+        nh = 720;
+    }
+    std::lock_guard<std::mutex> lock(g_scene.mutex);
+    const double cw = g_scene.canvasW, ch = g_scene.canvasH;
+    l.id = g_scene.nextId++;
+    if (l.kind == LayerKind::Camera)          // بالزاوية تحت يمين
+    {
+        l.w = cw * 0.26;
+        l.h = l.w * nh / nw;
+        l.x = cw - l.w - cw * 0.025;
+        l.y = ch - l.h - ch * 0.04;
+    }
+    else if (l.kind == LayerKind::Image)      // بالنص، مش أكبر من 60% من اللوحة
+    {
+        const double k = std::min(1.0, std::min(cw * 0.6 / nw, ch * 0.6 / nh));
+        l.w = nw * k;
+        l.h = nh * k;
+        l.x = (cw - l.w) / 2;
+        l.y = (ch - l.h) / 2;
+    }
+    else                                       // النص: تحت بالنص
+    {
+        double k = ch * 0.10 / nh;
+        k = std::min(k, cw * 0.9 / nw);
+        l.w = nw * k;
+        l.h = nh * k;
+        l.x = (cw - l.w) / 2;
+        l.y = ch * 0.84 - l.h / 2;
+    }
+    g_scene.layers.push_back(l);
+    g_selectedLayer = l.id;
+}
+
+std::wstring FileNameOf(const std::wstring& path);   // تحت
+
+bool PickImageFile(std::wstring& path)
+{
+    wchar_t buf[MAX_PATH * 2] = {};
+    if (!path.empty())
+        wcsncpy_s(buf, path.c_str(), _TRUNCATE);
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner   = g_hwnd;
+    ofn.lpstrFilter = L"الصور\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp;*.tif;*.tiff\0كل الملفات\0*.*\0";
+    ofn.lpstrFile   = buf;
+    ofn.nMaxFile    = MAX_PATH * 2;
+    ofn.lpstrTitle  = L"اختر صورة";
+    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn))
+        return false;
+    path = buf;
+    return true;
 }
 
 void RemoveLayer(int id)
@@ -939,7 +1051,7 @@ void LayerCommand(int id, int cmd)
     {
     case 0: FitLayer(l, cw, ch); break;                                        // ملاءمة
     case 1: l.x = 0; l.y = 0; l.w = cw; l.h = ch; break;                        // تمديد
-    case 2: { int sw, sh; if (GetCaptureSize(l.target, sw, sh)) { l.w = sw; l.h = sh; }
+    case 2: { int sw, sh; if (LayerNaturalSize(l, sw, sh)) { l.w = sw; l.h = sh; }
               l.x = (cw - l.w) / 2; l.y = (ch - l.h) / 2; break; }               // الحجم الأصلي
     case 3: l.x = (cw - l.w) / 2; l.y = (ch - l.h) / 2; break;                  // توسيط
     case 5: if (i + 1 < (int)g_scene.layers.size()) std::swap(g_scene.layers[i], g_scene.layers[i + 1]); break;  // للأمام
@@ -948,33 +1060,201 @@ void LayerCommand(int id, int cmd)
     }
 }
 
+// بعد تغيير النص/الخلفية/الصورة: منظبط العرض حسب الشكل الجديد (منحافظ على الطول والنص)
+void RefitAspect(int id)
+{
+    SceneLayer copy;
+    {
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        const int i = FindLayer(id);
+        if (i < 0) return;
+        copy = g_scene.layers[i];
+    }
+    int nw, nh;
+    if (!LayerNaturalSize(copy, nw, nh))
+        return;
+    std::lock_guard<std::mutex> lock(g_scene.mutex);
+    const int i = FindLayer(id);
+    if (i < 0) return;
+    SceneLayer& l = g_scene.layers[i];
+    const double cx = l.x + l.w / 2;
+    l.w = l.h * nw / nh;
+    l.x = cx - l.w / 2;
+}
+
+const unsigned TEXT_COLORS[] = { 0xFFFFFFFF, 0xFF0E1014, 0xFFE5484D, 0xFFF5C518, 0xFF3DD68C, 0xFF4F8CFF, 0xFFFF4FA3 };
+const wchar_t* TEXT_COLOR_NAMES[] = { L"أبيض", L"أسود", L"أحمر", L"أصفر", L"أخضر", L"أزرق", L"وردي" };
+
+// أوامر خاصة بالكاميرا والصورة والنص
+void LayerMediaCommand(int id, int code, POINT pt)
+{
+    SceneLayer copy;
+    {
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        const int i = FindLayer(id);
+        if (i < 0) return;
+        copy = g_scene.layers[i];
+    }
+    auto modify = [&](auto&& fn)
+    {
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        const int i = FindLayer(id);
+        if (i >= 0) fn(g_scene.layers[i]);
+    };
+
+    switch (code)
+    {
+    case 100:   // الشكل
+    {
+        const int pick = ShowMenu({ L"مستطيل", L"زوايا مدوّرة", L"دائرة" }, copy.shape, pt);
+        if (pick < 0) return;
+        modify([&](SceneLayer& l)
+        {
+            l.shape = pick;
+            if (pick == SHAPE_CIRCLE && l.kind == LayerKind::Camera)   // الدائرة لازم تكون مربّعة
+            {
+                const double s = std::min(l.w, l.h), cx = l.x + l.w / 2, cy = l.y + l.h / 2;
+                l.w = l.h = s;
+                l.x = cx - s / 2;
+                l.y = cy - s / 2;
+            }
+        });
+        break;
+    }
+    case 101:   // مراية
+        modify([](SceneLayer& l) { l.mirror = !l.mirror; });
+        break;
+    case 102:   // تغيير الصورة
+    {
+        std::wstring path = copy.source;
+        if (!PickImageFile(path)) return;
+        modify([&](SceneLayer& l) { l.source = path; l.target.name = FileNameOf(path); });
+        RefitAspect(id);
+        break;
+    }
+    case 103:   // تعديل النص
+    {
+        std::wstring text = copy.source;
+        if (!InputBox(L"النص", text, false, false, 200) || text.empty()) return;
+        modify([&](SceneLayer& l) { l.source = text; l.target.name = text; });
+        RefitAspect(id);
+        break;
+    }
+    case 104:   // اللون
+    {
+        std::vector<std::wstring> names(std::begin(TEXT_COLOR_NAMES), std::end(TEXT_COLOR_NAMES));
+        int checked = -1;
+        for (int k = 0; k < (int)names.size(); ++k)
+            if (TEXT_COLORS[k] == copy.color) checked = k;
+        const int pick = ShowMenu(names, checked, pt);
+        if (pick < 0) return;
+        modify([&](SceneLayer& l) { l.color = TEXT_COLORS[pick]; });
+        break;
+    }
+    case 105:   // الخلفية
+        modify([](SceneLayer& l) { l.background = !l.background; });
+        RefitAspect(id);
+        break;
+    }
+    SaveScenes();
+}
+
 void ShowLayerMenu(int id, POINT screenPt)
 {
     bool visible = true;
+    SceneLayer copy;
     {
         std::lock_guard<std::mutex> lock(g_scene.mutex);
         const int i = FindLayer(id);
         if (i < 0) return;
         visible = g_scene.layers[i].visible;
+        copy = g_scene.layers[i];
     }
-    const int cmd = ShowMenu({ L"ملاءمة داخل اللوحة", L"تمديد لملء اللوحة", L"الحجم الأصلي", L"توسيط",
-                               L"", L"نقل إلى الأمام", L"نقل إلى الخلف",
-                               L"", visible ? L"إخفاء" : L"إظهار", L"حذف" }, -1, screenPt);
-    if (cmd == 9)      RemoveLayer(id);
-    else if (cmd >= 0) LayerCommand(id, cmd);
+    std::vector<std::wstring> items = { L"ملاءمة داخل اللوحة", L"تمديد لملء اللوحة", L"الحجم الأصلي", L"توسيط",
+                                        L"", L"نقل إلى الأمام", L"نقل إلى الخلف",
+                                        L"", visible ? L"إخفاء" : L"إظهار", L"حذف" };
+    std::vector<int> codes(items.size(), -1);
+    auto extra = [&](const std::wstring& label, int code) { items.push_back(label); codes.push_back(code); };
+    if (copy.kind == LayerKind::Camera)
+    {
+        extra(L"", -1);
+        extra(L"الشكل…", 100);
+        extra(copy.mirror ? L"إلغاء عكس الصورة" : L"عكس الصورة (مثل المرآة)", 101);
+    }
+    else if (copy.kind == LayerKind::Image)
+    {
+        extra(L"", -1);
+        extra(L"الشكل…", 100);
+        extra(L"تغيير الصورة…", 102);
+    }
+    else if (copy.kind == LayerKind::Text)
+    {
+        extra(L"", -1);
+        extra(L"تعديل النص…", 103);
+        extra(L"لون النص…", 104);
+        extra(copy.background ? L"إزالة الخلفية" : L"إضافة خلفية خلف النص", 105);
+    }
+
+    const int cmd = ShowMenu(items, -1, screenPt);
+    if (cmd < 0) return;
+    if (cmd >= 10)     { if (codes[cmd] >= 0) LayerMediaCommand(id, codes[cmd], screenPt); }
+    else if (cmd == 9) RemoveLayer(id);
+    else               LayerCommand(id, cmd);
 }
 
 void ShowAddSourceMenu(POINT screenPt)
 {
+    const std::vector<CameraInfo>    cams    = ListCameras();
     const std::vector<CaptureTarget> targets = ListCaptureTargets(g_hwnd);
     std::vector<std::wstring> items;
+    for (const CameraInfo& c : cams)
+        items.push_back(L"كاميرا: " + c.name);
+    const int imageItem = (int)items.size();
+    items.push_back(L"صورة من ملف…");
+    items.push_back(L"نص…");
+    items.push_back(L"");
+    const int firstTarget = (int)items.size();
     for (const CaptureTarget& t : targets)
         items.push_back(t.isMonitor ? (L"شاشة كاملة: " + t.name) : (L"نافذة: " + t.name));
-    if (items.empty())
-        return;
+
     const int pick = ShowMenu(items, -1, screenPt);
-    if (pick >= 0)
-        AddLayer(targets[pick]);
+    if (pick < 0)
+        return;
+    if (pick < imageItem)                         // كاميرا
+    {
+        SceneLayer l;
+        l.kind        = LayerKind::Camera;
+        l.source      = cams[pick].link;
+        l.target.name = cams[pick].name;
+        l.shape       = SHAPE_ROUNDED;
+        AddMediaLayer(l);
+    }
+    else if (pick == imageItem)                   // صورة
+    {
+        std::wstring path;
+        if (!PickImageFile(path))
+            return;
+        SceneLayer l;
+        l.kind        = LayerKind::Image;
+        l.source      = path;
+        l.target.name = FileNameOf(path);
+        AddMediaLayer(l);
+    }
+    else if (pick == imageItem + 1)               // نص
+    {
+        std::wstring text = L"سأعود قريباً";
+        if (!InputBox(L"النص", text, false, false, 200) || text.empty())
+            return;
+        SceneLayer l;
+        l.kind        = LayerKind::Text;
+        l.source      = text;
+        l.target.name = text;
+        l.background  = true;
+        AddMediaLayer(l);
+    }
+    else if (pick >= firstTarget)
+        AddLayer(targets[pick - firstTarget]);
+    SaveScenes();
 }
 
 // =============================================================
@@ -1007,10 +1287,10 @@ void SwitchScene(int index)
     if (index < 0 || index >= (int)g_scenes.size() || index == g_activeScene)
         return;
     StoreActiveScene();
-    {
-        std::lock_guard<std::mutex> lock(g_scene.mutex);
-        g_scene.layers = g_scenes[index].layers;      // التسجيل بيكمّل بالمشهد الجديد فوراً
-    }
+    // التسجيل بيكمّل بالمشهد الجديد فوراً (مع تلاشي ناعم إذا مفعّل)
+    g_scene.ReplaceLayers(g_scenes[index].layers, TRANSITION_MS[g_transitionChoice]);
+    if (TRANSITION_MS[g_transitionChoice] > 0)
+        g_fadeTicks = TRANSITION_MS[g_transitionChoice] / 33 + 2;
     g_activeScene   = index;
     g_selectedLayer = 0;
     g_scroll        = 0;
@@ -1096,6 +1376,13 @@ void SaveScenes()
         fwprintf(f, L"S\t%ls\n", Clean(s.name).c_str());
         for (const SceneLayer& l : s.layers)
         {
+            if (l.kind != LayerKind::Capture)       // كاميرا / صورة / نص
+            {
+                fwprintf(f, L"M\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%d\t%d\t%u\t%d\t%ls\t%ls\n",
+                         (int)l.kind, l.x, l.y, l.w, l.h, l.visible ? 1 : 0, l.shape, l.mirror ? 1 : 0,
+                         l.color, l.background ? 1 : 0, Clean(l.source).c_str(), Clean(l.target.name).c_str());
+                continue;
+            }
             const RECT& r = l.target.rect;
             fwprintf(f, L"L\t%lc\t%ld\t%ld\t%ld\t%ld\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%ls\t%ls\t%ls\n",
                      l.target.isMonitor ? L'm' : L'w', r.left, r.top, r.right, r.bottom,
@@ -1143,6 +1430,26 @@ bool LoadScenes()
             active = _wtoi(p[1].c_str());
         else if (p[0] == L"S" && p.size() >= 2)
             g_scenes.push_back({ p[1], {} });
+        else if (p[0] == L"M" && p.size() >= 13 && !g_scenes.empty())
+        {
+            SceneLayer l;
+            l.id          = g_scene.nextId++;
+            l.kind        = (LayerKind)std::clamp(_wtoi(p[1].c_str()), 1, 3);
+            l.x           = _wtof(p[2].c_str());
+            l.y           = _wtof(p[3].c_str());
+            l.w           = _wtof(p[4].c_str());
+            l.h           = _wtof(p[5].c_str());
+            l.visible     = p[6] == L"1";
+            l.shape       = std::clamp(_wtoi(p[7].c_str()), 0, 2);
+            l.mirror      = p[8] == L"1";
+            l.color       = (unsigned)wcstoul(p[9].c_str(), nullptr, 10);
+            l.background  = p[10] == L"1";
+            l.source      = p[11];
+            l.target.name = p[12];
+            l.target.isMonitor = false;
+            if (l.w > 1 && l.h > 1)
+                g_scenes.back().layers.push_back(l);
+        }
         else if (p[0] == L"L" && p.size() >= 14 && !g_scenes.empty())
         {
             SceneLayer l;
@@ -1195,7 +1502,7 @@ void ReconnectLostWindows()
     auto fix = [](std::vector<SceneLayer>& layers)
     {
         for (SceneLayer& l : layers)
-            if (!l.target.isMonitor && !IsWindow(l.target.hwnd))
+            if (l.kind == LayerKind::Capture && !l.target.isMonitor && !IsWindow(l.target.hwnd))
                 if (HWND h = FindMatchingWindow(l.target, g_hwnd))
                 {
                     l.target.hwnd = h;
@@ -1226,10 +1533,13 @@ UINT32 AutoFps()
     CaptureTarget probe;
     {
         std::lock_guard<std::mutex> lock(g_scene.mutex);
-        if (!g_scene.layers.empty())
-            probe = g_scene.layers.front().target;
-        else
-            probe.rect = { 0, 0, 1, 1 };
+        probe.rect = { 0, 0, 1, 1 };
+        for (const SceneLayer& l : g_scene.layers)
+            if (l.kind == LayerKind::Capture)
+            {
+                probe = l.target;
+                break;
+            }
     }
     const UINT32 hz = GetRefreshRate(probe);
     cached = hz >= 59 ? 60 : std::max<UINT32>(24, hz);   // أقصى شي 60
@@ -1365,6 +1675,13 @@ void SaveSettings()
     put(L"MicMuted",     g_micAudio.IsMuted() ? L"1" : L"0");
     put(L"StreamRes",    std::to_wstring(g_streamRes));
     put(L"StreamKbps",   std::to_wstring(g_streamKbps));
+    put(L"VerticalMode", std::to_wstring(g_verticalMode));
+    put(L"ReplayChoice", std::to_wstring(g_replayChoice));
+    put(L"ReplayOn",     g_replayWanted ? L"1" : L"0");
+    put(L"Transition",   std::to_wstring(g_transitionChoice));
+    put(L"MicNoise",     g_micAudio.Filters().noise ? L"1" : L"0");
+    put(L"MicGate",      g_micAudio.Filters().gate ? L"1" : L"0");
+    put(L"MicLeveler",   g_micAudio.Filters().leveler ? L"1" : L"0");
 }
 
 void LoadSettings()
@@ -1406,6 +1723,14 @@ void LoadSettings()
     g_micAudio.SetMuted(getInt(L"MicMuted", 0) != 0);
     g_streamRes  = std::clamp(getInt(L"StreamRes", 1), 0, 2);
     g_streamKbps = (UINT32)std::clamp(getInt(L"StreamKbps", 6000), 1000, 20000);
+    g_verticalMode     = std::clamp(getInt(L"VerticalMode", 0), 0, 1);
+    g_replayChoice     = std::clamp(getInt(L"ReplayChoice", 1), 0, 3);
+    g_replayWanted     = getInt(L"ReplayOn", 0) != 0;
+    g_transitionChoice = std::clamp(getInt(L"Transition", 1), 0, 2);
+    g_micAudio.Filters().noise   = getInt(L"MicNoise", 0) != 0;
+    g_micAudio.Filters().gate    = getInt(L"MicGate", 0) != 0;
+    g_micAudio.Filters().leveler = getInt(L"MicLeveler", 0) != 0;
+    g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replayChoice]);
 }
 
 // =============================================================
@@ -1419,6 +1744,7 @@ void SetAudioEnabled(AudioSource& src, bool& flag, bool on)
     if (on) src.Start();
     else    src.Stop();
     SaveSettings();
+    RestartReplayIfActive();
 }
 
 // قائمة اختيار الجهاز (سماعات أو ميكروفون)
@@ -1445,6 +1771,7 @@ void ShowDeviceMenu(AudioSource& src, bool on, AudioSource::Kind kind, POINT pt)
         src.Start();
     }
     SaveSettings();
+    RestartReplayIfActive();
 }
 
 // من مستوى الصوت (0..1) لطول الشريط، بالـ dB لأن الأذن هيك بتسمع
@@ -1480,9 +1807,11 @@ void UpdatePreview()
 
     int cw, ch;
     std::vector<SceneLayer> layers;
-    g_scene.Snapshot(cw, ch, layers);
     std::vector<int> lost;
-    g_previewCompositor.Compose(layers, cw, ch, g_previewPixels.data(), pw, ph, pw * 4, false, &lost);
+    ComposeParams cp;
+    cp.out = g_previewPixels.data(); cp.outW = pw; cp.outH = ph; cp.stride = pw * 4; cp.lostIds = &lost;
+    g_scene.Snapshot(cw, ch, layers, cp.fade);
+    g_previewCompositor.Compose(layers, cw, ch, cp);
 
     // منعلّم الطبقات اللي نوافذها انسكّرت
     {
@@ -1649,8 +1978,8 @@ void SaveTargets()
     if (path.empty() || _wfopen_s(&f, path.c_str(), L"w, ccs=UTF-8") != 0 || !f)
         return;
     for (const StreamTarget& t : g_targets)
-        fwprintf(f, L"T\t%d\t%d\t%ls\t%ls\t%ls\n", (int)t.platform, t.enabled ? 1 : 0,
-                 Clean(t.name).c_str(), Clean(t.url).c_str(), ProtectText(t.key).c_str());
+        fwprintf(f, L"T\t%d\t%d\t%ls\t%ls\t%ls\t%d\n", (int)t.platform, t.enabled ? 1 : 0,
+                 Clean(t.name).c_str(), Clean(t.url).c_str(), ProtectText(t.key).c_str(), t.vertical ? 1 : 0);
     fclose(f);
 }
 
@@ -1676,6 +2005,7 @@ void LoadTargets()
         t.name     = p[3];
         t.url      = p[4];
         t.key      = UnprotectText(p[5]);
+        t.vertical = p.size() >= 7 && p[6] == L"1";
         g_targets.push_back(t);
     }
     fclose(f);
@@ -1851,6 +2181,7 @@ void AddTarget(POINT pt)
     t.name     = PlatformName(t.platform);
     t.url      = DefaultServer(t.platform);
     t.enabled  = true;
+    t.vertical = t.platform == Platform::TikTok;      // تيك توك عمودي من الأساس
     if (t.url.empty() && !EditTargetUrl(t))
         return;
     EditTargetKey(t);              // إذا لغاه بيقدر يحطّه بعدين من القائمة
@@ -1868,7 +2199,8 @@ void ShowTargetMenu(int index, POINT pt)
         return;
     }
     StreamTarget& t = g_targets[index];
-    const int pick = ShowMenu({ L"مفتاح البث", L"عنوان الخادم", L"إعادة التسمية", L"", L"حذف الوجهة" }, -1, pt);
+    const int pick = ShowMenu({ L"مفتاح البث", L"عنوان الخادم", L"إعادة التسمية",
+                                t.vertical ? L"✓   بث عمودي (9:16)" : L"      بث عمودي (9:16)", L"", L"حذف الوجهة" }, -1, pt);
     switch (pick)
     {
     case 0: if (EditTargetKey(t)) SaveTargets(); break;
@@ -1883,7 +2215,11 @@ void ShowTargetMenu(int index, POINT pt)
         }
         break;
     }
-    case 4:
+    case 3:
+        t.vertical = !t.vertical;
+        SaveTargets();
+        break;
+    case 5:
         g_targets.erase(g_targets.begin() + index);
         SaveTargets();
         break;
@@ -1949,6 +2285,9 @@ void StartStreaming()
         return;
     }
     StreamSize(opt.width, opt.height);
+    opt.verticalW    = g_streamRes == 2 ? 720 : 1080;
+    opt.verticalH    = g_streamRes == 2 ? 1280 : 1920;
+    opt.verticalMode = g_verticalMode == 0 ? VerticalMode::Crop : VerticalMode::Fit;
     opt.fps       = std::min<UINT32>(CurrentFps(), 60);
     opt.videoKbps = g_streamKbps;
     opt.encoder   = (EncoderMode)g_encoderMode;
@@ -2003,6 +2342,111 @@ int LiveCount()
     for (const OutputStatus& st : g_streamStatus)
         if (st.state == OutputState::Live) ++n;
     return n;
+}
+
+// =============================================================
+//  الإعادة: البرنامج بيحفظ آخر ثواني بالذاكرة
+// =============================================================
+void StartReplay(bool quiet = false)
+{
+    if (g_replay.IsActive())
+        return;
+
+    StreamOptions opt;
+    opt.scene    = &g_scene;
+    opt.notify   = g_hwnd;
+    opt.isReplay = true;
+    opt.replay   = g_replayBuffer;
+    g_replayBuffer->Clear();
+    g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replayChoice]);
+
+    // نفس جودة التسجيل (لحد 1080p لحتى ما تاكل الذاكرة)
+    int cw, ch;
+    {
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        cw = g_scene.canvasW;
+        ch = g_scene.canvasH;
+    }
+    UINT32 w = (UINT32)cw, h = (UINT32)ch;
+    if (h > 1080) { w = (UINT32)((double)cw * 1080 / ch); h = 1080; }
+    opt.width     = w & ~1u;
+    opt.height    = h & ~1u;
+    opt.fps       = std::min<UINT32>(CurrentFps(), 60);
+    opt.videoKbps = std::clamp<UINT32>(CurrentBitrate() / 1000, 2000, 40000);
+    opt.encoder   = (EncoderMode)g_encoderMode;
+    if (g_systemOn && g_systemAudio.IsRunning()) opt.audio.push_back(&g_systemAudio);
+    if (g_micOn && g_micAudio.IsRunning())       opt.audio.push_back(&g_micAudio);
+
+    std::wstring error;
+    if (!g_replay.Start(opt, error))
+    {
+        ShowMessage(L"تعذّر تشغيل الإعادة: " + error, true);
+        return;
+    }
+    g_replayWanted = true;
+    SaveSettings();
+    if (!quiet)
+        ShowMessage(L"الإعادة تعمل — اضغط F7 لحفظ آخر " + std::to_wstring(REPLAY_SECONDS[g_replayChoice]) + L" ثانية", false);
+}
+
+void StopReplay()
+{
+    if (!g_replay.IsActive())
+        return;
+    g_replay.Stop();
+    g_replayBuffer->Clear();
+    g_replayWanted = false;
+    SaveSettings();
+    ShowMessage(L"أُوقفت الإعادة", false);
+}
+
+void SaveReplay()
+{
+    if (!g_replay.IsActive())
+    {
+        ShowMessage(L"شغّل الإعادة أولاً (زر «الإعادة» في الأسفل)", true);
+        return;
+    }
+    CreateDirectoryW(g_folder.c_str(), nullptr);
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t name[64];
+    swprintf_s(name, L"Replay_%04d-%02d-%02d_%02d-%02d-%02d.mp4",
+               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    const std::wstring path = g_folder + L"\\" + name;
+
+    std::wstring error;
+    if (g_replayBuffer->Save(path, error))
+    {
+        g_lastFile = path;
+        ShowMessage(L"✓ حُفظت الإعادة: " + std::wstring(name), false);
+    }
+    else
+        ShowMessage(L"تعذّر حفظ الإعادة: " + error, true);
+}
+
+// إعدادات بتأثّر على الإعادة تغيّرت: منعيد تشغيلها
+void RestartReplayIfActive()
+{
+    if (!g_replay.IsActive())
+        return;
+    g_replay.Stop();
+    StartReplay(true);
+}
+
+// قائمة فلاتر المايك
+void ShowMicFilters(POINT pt)
+{
+    MicFilters& f = g_micAudio.Filters();
+    auto mark = [](bool on) { return on ? std::wstring(L"✓   ") : std::wstring(L"      "); };
+    const int pick = ShowMenu({ mark(f.noise)   + L"إزالة الضجيج (المروحة، المكيّف، الطنين)",
+                                mark(f.gate)    + L"البوابة (تُسكت المايك حين لا تتكلم)",
+                                mark(f.leveler) + L"توحيد مستوى الصوت (واضح وثابت)" }, -1, pt);
+    if (pick == 0) f.noise   = !f.noise;
+    if (pick == 1) f.gate    = !f.gate;
+    if (pick == 2) f.leveler = !f.leveler;
+    if (pick >= 0)
+        SaveSettings();
 }
 
 void OpenFolder()
@@ -2227,7 +2671,19 @@ void DrawAudioRow(const D2D1_RECT_F& r, const wchar_t* icon, const wchar_t* titl
         Fill(mute, Theme::Hover, 8);
     Text(muted ? Icon::Muted : icon, g_fIconBig.Get(), mute,
          muted ? Theme::Red : (on ? Theme::Text : Theme::SubText));
-    Text(title, g_fBody.Get(), Rect(r.left + 96, r.top + 6, r.right - 50, r.top + 26), Theme::Text);
+    // المايك: زر الفلاتر جنب زر الجهاز
+    const float textLeft = index == 1 ? r.left + 130 : r.left + 96;
+    if (index == 1)
+    {
+        const bool anyFilter = src.Filters().Any();
+        const D2D1_RECT_F fb = Rect(r.left + 94, r.top + 9, r.left + 126, r.top + 41);
+        if (AddHit(fb, ID_MIC_FILTERS))
+            Fill(fb, Theme::Hover, 8);
+        else if (anyFilter)
+            Fill(fb, WithAlpha(Theme::Accent, 0.16f), 8);
+        Text(Icon::Filter, g_fIcon.Get(), fb, anyFilter ? Theme::Accent : Theme::SubText);
+    }
+    Text(title, g_fBody.Get(), Rect(textLeft, r.top + 6, r.right - 50, r.top + 26), Theme::Text);
 
     std::wstring sub;
     D2D1_COLOR_F subColor = Theme::SubText;
@@ -2235,7 +2691,7 @@ void DrawAudioRow(const D2D1_RECT_F& r, const wchar_t* icon, const wchar_t* titl
     else if (!src.IsRunning()) { sub = L"لم يُعثر على جهاز"; subColor = Theme::Red; }
     else if (muted)            { sub = L"مكتوم"; subColor = Theme::Red; }
     else                        sub = src.DeviceName();
-    Text(sub, g_fSmall.Get(), Rect(r.left + 96, r.top + 26, r.right - 50, r.top + 44), subColor);
+    Text(sub, g_fSmall.Get(), Rect(textLeft, r.top + 26, r.right - 50, r.top + 44), subColor);
 
     // مفتاح التشغيل
     const D2D1_RECT_F toggle = Rect(r.left + 10, r.top + 12, r.left + 54, r.top + 38);
@@ -2359,13 +2815,20 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
         }
 
         const D2D1_COLOR_F textColor = l.visible ? Theme::Text : Theme::SubText;
-        Text(l.target.isMonitor ? Icon::Monitor : Icon::Window, g_fIconBig.Get(),
+        const wchar_t* kindIcon = l.kind == LayerKind::Camera ? Icon::Camera : l.kind == LayerKind::Image ? Icon::Photo
+                                : l.kind == LayerKind::Text ? Icon::Font : (l.target.isMonitor ? Icon::Monitor : Icon::Window);
+        Text(kindIcon, g_fIconBig.Get(),
              Rect(row.right - 44, row.top, row.right - 10, row.bottom), selected ? Theme::Accent : Theme::SubText);
         Text(l.target.name, g_fBody.Get(), Rect(row.left + 76, row.top + 5, row.right - 50, row.top + 27), textColor);
 
-        std::wstring sub = l.target.isMonitor ? L"شاشة كاملة" : L"نافذة";
+        std::wstring sub = l.kind == LayerKind::Camera ? L"كاميرا" : l.kind == LayerKind::Image ? L"صورة"
+                         : l.kind == LayerKind::Text ? L"نص" : (l.target.isMonitor ? L"شاشة كاملة" : L"نافذة");
         D2D1_COLOR_F subColor = Theme::SubText;
-        if (l.lost)          { sub = L"النافذة مغلقة"; subColor = Theme::Red; }
+        if (l.lost)
+        {
+            sub = l.kind == LayerKind::Camera ? L"الكاميرا غير متصلة" : l.kind == LayerKind::Image ? L"الملف غير موجود" : L"النافذة مغلقة";
+            subColor = Theme::Red;
+        }
         else if (!l.visible) { sub += L" • مخفية"; }
         Text(sub, g_fSmall.Get(), Rect(row.left + 76, row.top + 26, row.right - 50, row.top + 44), subColor);
 
@@ -2391,7 +2854,14 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
 {
     const bool  locked = Busy();
     const float L = side.left + 16, R = side.right - 16;
-    g_listRect = Rect(0, 0, 0, 0);
+
+    // التبويب بيتمرّر بعجلة الماوس إذا ما كفّت المساحة
+    const float top = y;
+    g_listRect = Rect(side.left + 4, top, side.right - 4, side.bottom - 6);
+    g_rt->PushAxisAlignedClip(g_listRect, D2D1_ANTIALIAS_MODE_ALIASED);
+    g_hitClipOn = true;
+    g_hitClip   = g_listRect;
+    y -= g_scroll;
 
     auto Label = [&](const wchar_t* s) { Text(s, g_fSection.Get(), Rect(L, y, R, y + 22), Theme::SubText); y += 24; };
     auto Hint  = [&](const std::wstring& s) { Text(s, g_fSmall.Get(), Rect(L, y, R, y + 18), Theme::SubText); y += 24; };
@@ -2445,6 +2915,17 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
     Hint(g_crashSafe ? std::wstring(L"لا يضيع التسجيل إذا تعطّل البرنامج أو انقطعت الكهرباء")
                      : std::wstring(L"يضيع التسجيل كله إذا تعطّل البرنامج قبل الإيقاف"));
 
+    // 7) الانتقال بين المشاهد (بيشتغل حتى وقت التسجيل)
+    Label(L"الانتقال بين المشاهد");
+    DrawSegmented(Rect(L, y, R, y + 34), { L"فوري", L"تلاشٍ سريع", L"تلاشٍ ناعم" }, g_transitionChoice, ID_TRANSITION_FIRST, true);
+    y += 44;
+
+    // 8) مدة الإعادة
+    Label(L"مدة الإعادة (حفظ آخر لحظات)");
+    DrawSegmented(Rect(L, y, R, y + 34), { L"15 ث", L"30 ث", L"60 ث", L"دقيقتان" }, g_replayChoice, ID_REPLAY_SEC_FIRST, true);
+    y += 38;
+    Hint(L"شغّل الإعادة من الشريط السفلي، واضغط F7 لحفظ آخر " + std::to_wstring(REPLAY_SECONDS[g_replayChoice]) + L" ثانية");
+
     // محرّك التصوير المستعمل
     const bool gpu = g_previewCompositor.UsingGpu();
     Text(gpu ? L"محرّك التصوير: بطاقة الرسومات (Windows Graphics Capture)"
@@ -2454,6 +2935,14 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
 
     if (locked)
         Text(L"لا يمكن تغيير الإعدادات أثناء التسجيل أو البث", g_fSmall.Get(), Rect(L, y, R, y + 18), Theme::Yellow);
+    y += 24;
+
+    // حدود التمرير
+    const float contentH = y + g_scroll - top;
+    const float viewH    = g_listRect.bottom - g_listRect.top;
+    g_scroll = std::clamp(g_scroll, 0.0f, std::max(0.0f, contentH - viewH));
+    g_hitClipOn = false;
+    g_rt->PopAxisAlignedClip();
 }
 
 
@@ -2468,7 +2957,7 @@ void DrawStreamTab(const D2D1_RECT_F& side, float y)
     Fill(add, live ? Theme::Off : (AddHit(add, ID_ADD_TARGET) ? D2D1::ColorF(0x6A9DFF) : Theme::Accent), 8);
     Text(L"+  إضافة وجهة", g_fSegment.Get(), add, Theme::White);
 
-    const float settingsH = 196;
+    const float settingsH = 262;
     g_listRect = Rect(side.left + 8, y + 38, side.right - 8, side.bottom - settingsH);
 
     const float rowH = 62, gap = 6;
@@ -2497,7 +2986,7 @@ void DrawStreamTab(const D2D1_RECT_F& side, float y)
         const D2D1_RECT_F badge = Rect(row.right - 50, row.top + 12, row.right - 12, row.top + 50);
         DrawPlatformIcon((int)t.platform, badge, t.enabled);
 
-        Text(t.name, g_fBody.Get(), Rect(row.left + 96, row.top + 9, row.right - 60, row.top + 31),
+        Text(t.vertical ? t.name + L"  •  عمودي" : t.name, g_fBody.Get(), Rect(row.left + 96, row.top + 9, row.right - 60, row.top + 31),
              t.enabled ? Theme::Text : Theme::SubText);
 
         // السطر التاني: الحالة
@@ -2555,6 +3044,10 @@ void DrawStreamTab(const D2D1_RECT_F& side, float y)
          g_fSmall.Get(), Rect(L, sy + 72, R, sy + 90), Theme::SubText);
 
     sy += 96;
+    Text(L"البث العمودي (لتيك توك)", g_fSection.Get(), Rect(L, sy, R, sy + 22), Theme::SubText);
+    sy += 24;
+    DrawSegmented(Rect(L, sy, R, sy + 34), { L"قصّ المنتصف", L"الشاشة كاملة" }, g_verticalMode, ID_VERTICAL_FIRST, !live);
+    sy += 42;
     Text(L"معدّل البت", g_fSection.Get(), Rect(L, sy, R, sy + 22), Theme::SubText);
     sy += 24;
     const D2D1_RECT_F box   = Rect(L, sy, R, sy + 34);
@@ -2625,10 +3118,27 @@ void DrawBottomBar(const D2D1_RECT_F& bar)
          streaming ? Theme::White : Theme::Text);
 
     // زر فتح المجلد
-    const D2D1_RECT_F folder = Rect(bar.left + 16, cy - 20, bar.left + 186, cy + 20);
+    const D2D1_RECT_F folder = Rect(bar.left + 16, cy - 20, bar.left + 56, cy + 20);
     Fill(folder, AddHit(folder, ID_FOLDER) ? Theme::Hover : Theme::Card, 10);
-    Text(Icon::Folder, g_fIcon.Get(), Rect(folder.right - 40, folder.top, folder.right - 8, folder.bottom), Theme::SubText);
-    Text(L"فتح مجلد التسجيلات", g_fBody.Get(), Rect(folder.left + 10, folder.top, folder.right - 40, folder.bottom), Theme::Text);
+    Text(Icon::Folder, g_fIcon.Get(), folder, Theme::SubText);
+
+    // زر الإعادة: مطفي = "تشغيل الإعادة" ، شغّال = "حفظ الإعادة" + زر صغير للإيقاف
+    const bool replayOn = g_replay.IsActive();
+    const D2D1_RECT_F rb = Rect(bar.left + 64, cy - 20, bar.left + 222, cy + 20);
+    const bool rbHover = AddHit(rb, ID_REPLAY);
+    if (replayOn) Fill(rb, rbHover ? WithAlpha(Theme::Accent, 0.32f) : WithAlpha(Theme::Accent, 0.18f), 10);
+    else          Fill(rb, rbHover ? Theme::Hover : Theme::Card, 10);
+    Text(Icon::Replay, g_fIcon.Get(), Rect(rb.right - 36, rb.top, rb.right - 8, rb.bottom), replayOn ? Theme::Accent : Theme::SubText);
+    if (replayOn)
+    {
+        const D2D1_RECT_F stop = Rect(rb.left + 4, cy - 14, rb.left + 32, cy + 14);
+        if (AddHit(stop, ID_REPLAY_STOP))
+            Fill(stop, D2D1::ColorF(0xE5484D, 0.25f), 7);
+        Text(Icon::Close, g_fIcon.Get(), stop, Theme::SubText);
+        Text(L"حفظ الإعادة", g_fCenter.Get(), Rect(rb.left + 32, rb.top, rb.right - 36, rb.bottom), Theme::Text);
+    }
+    else
+        Text(L"تشغيل الإعادة", g_fCenter.Get(), Rect(rb.left + 8, rb.top, rb.right - 36, rb.bottom), Theme::Text);
 
     // يمين: الرسالة + الاختصارات
     const D2D1_RECT_F info = Rect(cx + R + 24, bar.top, bar.right - 20, bar.bottom);
@@ -2640,7 +3150,7 @@ void DrawBottomBar(const D2D1_RECT_F& bar)
     else
         Text(rec ? L"المشفّر: " + g_recorder.EncoderName() : std::wstring(L"رتّب المشهد ثم اضغط الزر الأحمر"),
              g_fBody.Get(), Rect(info.left, cy - 22, info.right, cy), Theme::Text);
-    Text(L"F9 تسجيل  •  F10 إيقاف مؤقت  •  F8 بث", g_fSmall.Get(),
+    Text(L"F9 تسجيل  •  F10 إيقاف مؤقت  •  F8 بث  •  F7 حفظ الإعادة", g_fSmall.Get(),
          Rect(info.left, cy + 2, info.right, cy + 22), Theme::SubText);
 }
 
@@ -2904,17 +3414,35 @@ void OnClick(int id, D2D1_POINT_2F p)
 
     if (id >= ID_CANVAS_FIRST && id < ID_CANVAS_FIRST + 4)
     {
-        if (!rec) { g_canvasChoice = id - ID_CANVAS_FIRST; ApplyCanvasChoice(); SaveSettings(); }
+        if (!rec) { g_canvasChoice = id - ID_CANVAS_FIRST; ApplyCanvasChoice(); SaveSettings(); RestartReplayIfActive(); }
         return;
     }
     if (id >= ID_FPS_FIRST && id < ID_FPS_FIRST + 4)
     {
-        if (!rec) { g_fpsChoice = id - ID_FPS_FIRST; SaveSettings(); }
+        if (!rec) { g_fpsChoice = id - ID_FPS_FIRST; SaveSettings(); RestartReplayIfActive(); }
         return;
     }
     if (id >= ID_CONTAINER_FIRST && id < ID_CONTAINER_FIRST + 2)
     {
         if (!rec) { g_crashSafe = (id == ID_CONTAINER_FIRST); SaveSettings(); }
+        return;
+    }
+    if (id >= ID_REPLAY_SEC_FIRST && id < ID_REPLAY_SEC_FIRST + 4)
+    {
+        g_replayChoice = id - ID_REPLAY_SEC_FIRST;
+        g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replayChoice]);
+        SaveSettings();
+        return;
+    }
+    if (id >= ID_TRANSITION_FIRST && id < ID_TRANSITION_FIRST + 3)
+    {
+        g_transitionChoice = id - ID_TRANSITION_FIRST;
+        SaveSettings();
+        return;
+    }
+    if (id >= ID_VERTICAL_FIRST && id < ID_VERTICAL_FIRST + 2)
+    {
+        if (!g_streamer.IsActive()) { g_verticalMode = id - ID_VERTICAL_FIRST; SaveSettings(); }
         return;
     }
     if (id >= ID_STREAM_RES_FIRST && id < ID_STREAM_RES_FIRST + 3)
@@ -2924,7 +3452,7 @@ void OnClick(int id, D2D1_POINT_2F p)
     }
     if (id >= ID_QUALITY_FIRST && id < ID_QUALITY_FIRST + 4)
     {
-        if (!rec) { g_quality = id - ID_QUALITY_FIRST; SaveSettings(); }
+        if (!rec) { g_quality = id - ID_QUALITY_FIRST; SaveSettings(); RestartReplayIfActive(); }
         return;
     }
     switch (id)
@@ -2934,7 +3462,10 @@ void OnClick(int id, D2D1_POINT_2F p)
     case ID_MIC_MUTE:      g_micAudio.SetMuted(!g_micAudio.IsMuted()); SaveSettings(); break;
     case ID_TAB_SOURCES:   g_tab = 0; g_scroll = 0; break;
     case ID_TAB_STREAM:    g_tab = 1; g_scroll = 0; break;
-    case ID_TAB_SETTINGS:  g_tab = 2; break;
+    case ID_TAB_SETTINGS:  g_tab = 2; g_scroll = 0; break;
+    case ID_REPLAY:        if (g_replay.IsActive()) SaveReplay(); else StartReplay(); break;
+    case ID_REPLAY_STOP:   StopReplay(); break;
+    case ID_MIC_FILTERS:   ShowMicFilters(screen); break;
     case ID_STREAM:        ToggleStreaming(); break;
     case ID_ADD_TARGET:    AddTarget(screen); break;
     case ID_STREAM_KBPS_MINUS:
@@ -2945,7 +3476,7 @@ void OnClick(int id, D2D1_POINT_2F p)
         break;
     case ID_BITRATE_MINUS: if (!rec) { ChangeBitrate(-1); SaveSettings(); } break;
     case ID_BITRATE_PLUS:  if (!rec) { ChangeBitrate(+1); SaveSettings(); } break;
-    case ID_ENCODER_MENU:  if (!rec) ShowEncoderMenu(screen); break;
+    case ID_ENCODER_MENU:  if (!rec) { ShowEncoderMenu(screen); RestartReplayIfActive(); } break;
     case ID_RECORD:        ToggleRecording(); break;
     case ID_PAUSE:         TogglePause();     break;
     case ID_FOLDER:        OpenFolder();      break;
@@ -2996,6 +3527,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         RegisterHotKey(hwnd, HOTKEY_RECORD, MOD_NOREPEAT, VK_F9);
         RegisterHotKey(hwnd, HOTKEY_PAUSE,  MOD_NOREPEAT, VK_F10);
         RegisterHotKey(hwnd, HOTKEY_STREAM, MOD_NOREPEAT, VK_F8);
+        RegisterHotKey(hwnd, HOTKEY_REPLAY, MOD_NOREPEAT, VK_F7);
         LoadTargets();
         return 0;
     }
@@ -3005,8 +3537,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_systemLevel = std::max(LevelToMeter(g_systemAudio.TakePeak()), g_systemLevel * 0.88f);
         g_micLevel    = std::max(LevelToMeter(g_micAudio.TakePeak()),    g_micLevel * 0.88f);
         // المعاينة: 10 مرات بالثانية (ووقت التسجيل 5 لنوفّر المعالج)
-        if (g_tick % (Busy() ? 6 : 3) == 0)
+        if (g_fadeTicks > 0)            // وقت التلاشي: المعاينة كل إطار لتبيّن ناعمة
+        {
+            --g_fadeTicks;
             UpdatePreview();
+        }
+        else if (g_tick % (Busy() ? 6 : 3) == 0)
+            UpdatePreview();
+        if (g_tick == 20 && g_replayWanted && !g_replay.IsActive())   // كانت شغّالة آخر مرة
+            StartReplay(true);
         if (g_streamer.IsActive())
             g_streamStatus = g_streamer.Status();
         if (g_tick % 60 == 0)           // كل ثانيتين: النوافذ اللي رجعت انفتحت
@@ -3225,11 +3764,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (wParam == HOTKEY_RECORD) ToggleRecording();
         if (wParam == HOTKEY_PAUSE)  TogglePause();
         if (wParam == HOTKEY_STREAM) ToggleStreaming();
+        if (wParam == HOTKEY_REPLAY) SaveReplay();
         return 0;
 
-    case WM_STREAMER_DONE:   // البث وقف لحالو (مشكلة بمشفّر الفيديو)
-        StopStreaming(L"");
-        ShowMessage(L"توقّف البث: حدث خطأ في مشفّر الفيديو", true);
+    case WM_STREAMER_DONE:   // البث (أو الإعادة) وقف لحالو (مشكلة بمشفّر الفيديو)
+        if (lParam == 1)
+        {
+            g_replay.Stop();
+            ShowMessage(L"توقّفت الإعادة: حدث خطأ في مشفّر الفيديو", true);
+        }
+        else
+        {
+            StopStreaming(L"");
+            ShowMessage(L"توقّف البث: حدث خطأ في مشفّر الفيديو", true);
+        }
         return 0;
 
     case WM_RECORDER_DONE:   // المسجّل وقف لحالو (صار خطأ)
@@ -3246,7 +3794,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         UnregisterHotKey(hwnd, HOTKEY_RECORD);
         UnregisterHotKey(hwnd, HOTKEY_PAUSE);
         UnregisterHotKey(hwnd, HOTKEY_STREAM);
+        UnregisterHotKey(hwnd, HOTKEY_REPLAY);
         g_streamer.Stop();
+        g_replay.Stop();
         g_recorder.Stop();           // إذا سكّرت وهو عم يسجّل، منحفظ الملف أول
         g_systemAudio.Stop();
         g_micAudio.Stop();

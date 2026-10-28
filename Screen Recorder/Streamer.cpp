@@ -1,7 +1,7 @@
 // =============================================================
-//  Streamer.cpp - البث المباشر
+//  Streamer.cpp - البث المباشر (+ الإعادة)
 //
-//   خيط الصورة: المشهد -> NV12 -> H.264 -> كل المنصات
+//   خيط الصورة (لكل نسخة): المشهد -> NV12 -> H.264 -> المنصات
 //   خيط الصوت : خلط المصادر -> AAC -> كل المنصات
 // =============================================================
 #include "Streamer.h"
@@ -34,7 +34,7 @@ bool Streamer::Start(const StreamOptions& options, std::wstring& error)
         error = L"لا يوجد مشهد";
         return false;
     }
-    if (m_opt.targets.empty())
+    if (m_opt.targets.empty() && !m_opt.replay)
     {
         error = L"فعّل وجهة بث واحدة على الأقل";
         return false;
@@ -53,24 +53,41 @@ bool Streamer::Start(const StreamOptions& options, std::wstring& error)
         }
     }
 
-    m_width  = std::max<UINT32>(64, m_opt.width & ~1u);
-    m_height = std::max<UINT32>(64, m_opt.height & ~1u);
+    // أي نسخ منحتاج: الأفقية (للمنصات العادية والإعادة) والعمودية (تيك توك)
+    bool needMain = m_opt.replay != nullptr, needVertical = false;
+    for (const StreamTarget& t : m_opt.targets)
+        (t.vertical ? needVertical : needMain) = true;
+
     const UINT32 fps = std::clamp<UINT32>(m_opt.fps, 10, 60);
     m_opt.fps = fps;
     m_frameDuration = ONE_SECOND / fps;
 
+    m_tracks[0].active = needMain;
+    m_tracks[0].width  = std::max<UINT32>(64, m_opt.width & ~1u);
+    m_tracks[0].height = std::max<UINT32>(64, m_opt.height & ~1u);
+    m_tracks[1].active = needVertical;
+    m_tracks[1].width  = std::max<UINT32>(64, m_opt.verticalW & ~1u);
+    m_tracks[1].height = std::max<UINT32>(64, m_opt.verticalH & ~1u);
+
     // المشفّرات
-    const bool tryHw   = m_opt.encoder != EncoderMode::Software;
-    const bool allowSw = true;
-    if (FAILED(m_video.Init(m_width, m_height, fps, m_opt.videoKbps, tryHw, allowSw)))
+    const bool tryHw = m_opt.encoder != EncoderMode::Software;
+    m_encoderName.clear();
+    for (int t = 0; t < 2; ++t)
     {
-        error = L"تعذّر تشغيل مشفّر الفيديو";
-        return false;
+        if (!m_tracks[t].active)
+            continue;
+        if (FAILED(m_tracks[t].encoder.Init(m_tracks[t].width, m_tracks[t].height, fps, m_opt.videoKbps, tryHw, true)))
+        {
+            for (Track& tr : m_tracks) tr.encoder.Shutdown();
+            error = L"تعذّر تشغيل مشفّر الفيديو";
+            return false;
+        }
+        if (m_encoderName.empty())
+            m_encoderName = m_tracks[t].encoder.Name();
     }
-    m_encoderName = m_video.Name();
     if (FAILED(m_audio.Init(m_opt.audioKbps)))
     {
-        m_video.Shutdown();
+        for (Track& tr : m_tracks) tr.encoder.Shutdown();
         error = L"تعذّر تشغيل مشفّر الصوت";
         return false;
     }
@@ -78,15 +95,19 @@ bool Streamer::Start(const StreamOptions& options, std::wstring& error)
     // المُرسِلات: وحدة لكل منصة
     m_shared = std::make_shared<Shared>();
     std::shared_ptr<Shared> shared = m_shared;
-    StreamInfo info;
-    info.width = m_width; info.height = m_height; info.fps = fps;
-    info.videoKbps = m_opt.videoKbps; info.audioKbps = m_opt.audioKbps;
+    m_outputs.clear();
+    m_outputTrack.clear();
     for (const StreamTarget& t : m_opt.targets)
     {
+        const int track = t.vertical ? 1 : 0;
+        StreamInfo info;
+        info.width = m_tracks[track].width; info.height = m_tracks[track].height; info.fps = fps;
+        info.videoKbps = m_opt.videoKbps; info.audioKbps = m_opt.audioKbps;
         m_outputs.push_back(std::make_unique<RtmpOutput>(
             t, info,
-            [shared] { std::lock_guard<std::mutex> lock(shared->mutex); return shared->avcConfig; },
-            [shared] { shared->forceKeyframe = true; }));
+            [shared, track] { std::lock_guard<std::mutex> lock(shared->mutex); return shared->avcConfig[track]; },
+            [shared, track] { shared->forceKeyframe[track] = true; }));
+        m_outputTrack.push_back(track);
     }
 
     // الصوت
@@ -107,7 +128,9 @@ bool Streamer::Start(const StreamOptions& options, std::wstring& error)
     m_active  = true;
     for (auto& o : m_outputs)
         o->Start();
-    m_videoThread = std::thread(&Streamer::VideoThread, this);
+    for (int t = 0; t < 2; ++t)
+        if (m_tracks[t].active)
+            m_tracks[t].thread = std::thread(&Streamer::VideoThread, this, t);
     m_audioThread = std::thread(&Streamer::AudioThread, this);
     return true;
 }
@@ -117,7 +140,8 @@ void Streamer::Stop()
     if (!m_active)
         return;
     m_running = false;
-    if (m_videoThread.joinable()) m_videoThread.join();
+    for (Track& t : m_tracks)
+        if (t.thread.joinable()) t.thread.join();
     if (m_audioThread.joinable()) m_audioThread.join();
 
     for (size_t i = 0; i < m_opt.audio.size() && i < m_taps.size(); ++i)
@@ -128,9 +152,15 @@ void Streamer::Stop()
     // لحتى ما تعلق الواجهة
     auto outputs = std::make_shared<std::vector<std::unique_ptr<RtmpOutput>>>(std::move(m_outputs));
     m_outputs.clear();
-    std::thread([outputs] { outputs->clear(); }).detach();
+    m_outputTrack.clear();
+    if (!outputs->empty())
+        std::thread([outputs] { outputs->clear(); }).detach();
 
-    m_video.Shutdown();
+    for (Track& t : m_tracks)
+    {
+        t.encoder.Shutdown();
+        t.active = false;
+    }
     m_audio.Shutdown();
     m_active = false;
 }
@@ -159,24 +189,30 @@ std::vector<OutputStatus> Streamer::Status()
 // نفس القطعة لكل المنصات (بدون نسخ: shared_ptr)
 void Streamer::Broadcast(std::vector<EncodedPacket>& packets)
 {
+    std::lock_guard<std::mutex> lock(m_broadcastMutex);
     for (EncodedPacket& p : packets)
     {
         auto shared = std::make_shared<const EncodedPacket>(std::move(p));
-        for (auto& o : m_outputs)
-            o->Push(shared);
+        for (size_t i = 0; i < m_outputs.size(); ++i)
+            if (!shared->video || shared->track == m_outputTrack[i])
+                m_outputs[i]->Push(shared);
+        if (m_opt.replay && (!shared->video || shared->track == 0))
+            m_opt.replay->Push(shared);
     }
     packets.clear();
 }
 
 // =============================================================
-//  خيط الصورة
+//  خيط الصورة (وحدة لكل نسخة: أفقية / عمودية)
 // =============================================================
-void Streamer::VideoThread()
+void Streamer::VideoThread(int t)
 {
     const HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
-    std::vector<BYTE>    frame((size_t)m_width * m_height * 4);
-    std::vector<uint8_t> nv12((size_t)m_width * m_height * 3 / 2);
+    Track& track = m_tracks[t];
+    const UINT32 W = track.width, H = track.height;
+    std::vector<BYTE>    frame((size_t)W * H * 4);
+    std::vector<uint8_t> nv12((size_t)W * H * 3 / 2);
     std::vector<EncodedPacket> packets;
     bool failed = false;
 
@@ -189,30 +225,62 @@ void Streamer::VideoThread()
         timeBeginPeriod(1);
         while (m_running)
         {
-            m_opt.scene->Snapshot(canvasW, canvasH, layers);
-            compositor.Compose(layers, canvasW, canvasH, frame.data(), (int)m_width, (int)m_height, (int)m_width * 4, false);
-            BgraToNv12(frame.data(), (int)m_width, (int)m_height, nv12.data());
+            ComposeParams cp;
+            cp.out = frame.data(); cp.outW = (int)W; cp.outH = (int)H; cp.stride = (int)W * 4;
+            m_opt.scene->Snapshot(canvasW, canvasH, layers, cp.fade);
 
-            LONGLONG t = Elapsed100ns();
-            if (t <= last) t = last + 1;
-            last = t;
+            // النسخة العمودية: أي جزء من اللوحة منعرض
+            if (t == 1 && canvasW > 0 && canvasH > 0)
+            {
+                const double aspect = (double)W / H;                 // 9/16
+                const double canvasAspect = (double)canvasW / canvasH;
+                if (m_opt.verticalMode == VerticalMode::Crop)
+                {
+                    // قصّ من النص بطول اللوحة كلها
+                    cp.viewH = canvasH;
+                    cp.viewW = canvasH * aspect;
+                    if (cp.viewW > canvasW) { cp.viewW = canvasW; cp.viewH = canvasW / aspect; }
+                }
+                else
+                {
+                    // اللوحة كلها بالعرض، وفوقها وتحتها أسود
+                    cp.viewW = canvasW;
+                    cp.viewH = canvasW / aspect;
+                    if (canvasAspect < aspect) { cp.viewH = canvasH; cp.viewW = canvasH * aspect; }
+                }
+                cp.viewX = (canvasW - cp.viewW) / 2;
+                cp.viewY = (canvasH - cp.viewH) / 2;
+            }
 
-            const bool key = m_shared->forceKeyframe.exchange(false);
-            if (FAILED(m_video.Encode(nv12.data(), t, key, packets)))
+            compositor.Compose(layers, canvasW, canvasH, cp);
+            BgraToNv12(frame.data(), (int)W, (int)H, nv12.data());
+
+            LONGLONG now100 = Elapsed100ns();
+            if (now100 <= last) now100 = last + 1;
+            last = now100;
+
+            const bool key = m_shared->forceKeyframe[t].exchange(false);
+            if (FAILED(track.encoder.Encode(nv12.data(), now100, key, packets)))
             {
                 failed = true;
                 break;
             }
+            for (EncodedPacket& p : packets)
+                p.track = (uint8_t)t;
 
-            // أول مرة بيطلع SPS/PPS منحفظهم للمُرسِلات
+            // أول مرة بيطلع SPS/PPS منحفظهم للمُرسِلات (وللإعادة)
             {
                 std::lock_guard<std::mutex> lock(m_shared->mutex);
-                if (m_shared->avcConfig.empty())
-                    m_shared->avcConfig = m_video.AvcConfig();
+                if (m_shared->avcConfig[t].empty())
+                {
+                    m_shared->avcConfig[t] = track.encoder.AvcConfig();
+                    if (t == 0 && m_opt.replay && !m_shared->avcConfig[t].empty())
+                        m_opt.replay->SetVideoInfo(m_shared->avcConfig[t], (int)W, (int)H);
+                }
             }
             Broadcast(packets);
 
-            const LONGLONG next = (t / m_frameDuration + 1) * m_frameDuration;
+            const LONGLONG next = (now100 / m_frameDuration + 1) * m_frameDuration;
             const LONGLONG now  = Elapsed100ns();
             if (next > now)
                 Sleep((DWORD)((next - now) / 10'000));
@@ -226,7 +294,7 @@ void Streamer::VideoThread()
     if (failed)
     {
         m_running = false;
-        PostMessageW(m_opt.notify, WM_STREAMER_DONE, (WPARAM)E_FAIL, 0);
+        PostMessageW(m_opt.notify, WM_STREAMER_DONE, (WPARAM)E_FAIL, m_opt.isReplay ? 1 : 0);
     }
 }
 

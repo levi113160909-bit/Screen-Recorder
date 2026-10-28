@@ -1,4 +1,4 @@
-﻿// =============================================================
+// =============================================================
 //  Capture.h - كل شي بخص "شو منصوّر":
 //   - قائمة الشاشات والنوافذ
 //   - FrameGrabber: بياخد صورة من شاشة أو نافذة
@@ -24,14 +24,34 @@ struct CaptureTarget
     std::wstring exePath;            // البرنامج اللي فاتحها
 };
 
+// نوع الطبقة
+enum class LayerKind
+{
+    Capture,    // شاشة أو نافذة
+    Camera,     // كاميرا (ويب كام)
+    Image,      // صورة من ملف
+    Text        // نص
+};
+
+// شكل الطبقة (للكاميرا والصور)
+enum LayerShape { SHAPE_RECT = 0, SHAPE_ROUNDED = 1, SHAPE_CIRCLE = 2 };
+
 // طبقة بالمشهد (متل OBS): مصدر + مكانه وحجمه جوّا لوحة الفيديو
 struct SceneLayer
 {
     int           id = 0;
-    CaptureTarget target;
+    LayerKind     kind = LayerKind::Capture;
+    CaptureTarget target;                        // للشاشة والنافذة (و target.name = اسم الطبقة لكل الأنواع)
     double        x = 0, y = 0, w = 0, h = 0;   // ببكسل الفيديو
     bool          visible = true;
-    bool          lost    = false;               // النافذة انسكّرت
+    bool          lost    = false;               // النافذة انسكّرت / الكاميرا مفصولة / الملف مش موجود
+
+    // للكاميرا والصورة والنص
+    std::wstring  source;                        // الكاميرا: رابط الجهاز ، الصورة: المسار ، النص: النص نفسه
+    int           shape = SHAPE_RECT;
+    bool          mirror = false;                // الكاميرا: عكس متل المراية
+    unsigned      color = 0xFFFFFFFF;            // النص: اللون (ARGB)
+    bool          background = false;            // النص: خلفية غامقة وراه
 };
 
 // بيرجّع كل الشاشات، وبعدها كل النوافذ المفتوحة (ما عدا exclude)

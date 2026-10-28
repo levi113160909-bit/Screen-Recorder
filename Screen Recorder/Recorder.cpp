@@ -405,8 +405,10 @@ void Recorder::VideoThread()
 
             // نسخة من المشهد (يمكن المستخدم عم يحرّك الطبقات هلق)
             // وإذا تغيّر حجم اللوحة منصغّرها/منكبّرها لحجم الفيديو
-            m_opt.scene->Snapshot(canvasW, canvasH, layers);
-            compositor.Compose(layers, canvasW, canvasH, frame.data(), m_width, m_height, m_width * 4, true);
+            ComposeParams cp;
+            cp.out = frame.data(); cp.outW = m_width; cp.outH = m_height; cp.stride = m_width * 4; cp.bottomUp = true;
+            m_opt.scene->Snapshot(canvasW, canvasH, layers, cp.fade);
+            compositor.Compose(layers, canvasW, canvasH, cp);
             m_usingGpu = compositor.UsingGpu();
 
             LONGLONG t = Elapsed100ns();

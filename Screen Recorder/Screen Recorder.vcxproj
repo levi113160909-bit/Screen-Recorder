@@ -158,6 +158,9 @@
     <ClCompile Include="Encoders.cpp" />
     <ClCompile Include="Rtmp.cpp" />
     <ClCompile Include="Streamer.cpp" />
+    <ClCompile Include="Media.cpp" />
+    <ClCompile Include="AudioFilters.cpp" />
+    <ClCompile Include="Replay.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Recorder.h" />
@@ -169,6 +172,9 @@
     <ClInclude Include="Encoders.h" />
     <ClInclude Include="Rtmp.h" />
     <ClInclude Include="Streamer.h" />
+    <ClInclude Include="Media.h" />
+    <ClInclude Include="AudioFilters.h" />
+    <ClInclude Include="Replay.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="app.rc" />

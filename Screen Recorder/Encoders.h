@@ -27,6 +27,7 @@ struct EncodedPacket
     bool                 video = true;
     bool                 keyframe = false;   // إطار كامل (منه بيقدر المشاهد يبلّش)
     uint32_t             timeMs = 0;
+    uint8_t              track = 0;          // فيديو: 0 = البث العادي ، 1 = العمودي
     std::vector<uint8_t> data;               // فيديو: NALUs بطول قبل كل وحدة (AVCC) ، صوت: AAC خام
 };
 

@@ -1,4 +1,4 @@
-﻿// =============================================================
+// =============================================================
 //  Gpu.h - محرّك التصوير الحديث (على كرت الشاشة)
 //
 //  بدل ما ننسخ الشاشة بالمعالج (GDI البطيئة)، منستعمل:
@@ -15,7 +15,7 @@
 #include <windows.h>
 #include <memory>
 #include <vector>
-#include "Capture.h"
+#include "Scene.h"
 
 class GpuCompositor
 {
@@ -27,8 +27,7 @@ public:
     // بيركّب المشهد وبيكتب الصورة بـ out (BGRA، كل سطر stride بايت)
     // bottomUp = السطور من تحت لفوق (هيك بدها Media Foundation)
     // بيرجّع false إذا صار خطأ بكرت الشاشة (وقتها منرجع للطريقة القديمة)
-    bool Compose(const std::vector<SceneLayer>& layers, int canvasW, int canvasH,
-                 BYTE* out, int outW, int outH, int stride, bool bottomUp, std::vector<int>* lostIds);
+    bool Compose(const std::vector<SceneLayer>& layers, int canvasW, int canvasH, const ComposeParams& params);
 
 private:
     GpuCompositor() = default;
