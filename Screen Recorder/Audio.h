@@ -1,4 +1,4 @@
-﻿// =============================================================
+// =============================================================
 //  Audio.h - مصدر صوت: صوت الكمبيوتر أو المايك
 //
 //  كل مصدر بيشتغل بخيط لحالو وبياخد الصوت من ويندوز (WASAPI)
@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <atomic>
 #include <deque>
+#include <map>
 #include <future>
 #include <mutex>
 #include <string>
@@ -45,6 +46,12 @@ public:
 
     std::wstring DeviceName();
 
+    // علو الصوت (0..2 ، 1 = طبيعي) والكتم - بيشتغلوا حتى وقت التسجيل
+    void  SetVolume(float v) { m_volume = v < 0 ? 0 : (v > 2 ? 2 : v); }
+    float Volume() const     { return m_volume; }
+    void  SetMuted(bool m)   { m_muted = m; }
+    bool  IsMuted() const    { return m_muted; }
+
     // اختيار الجهاز: id فاضي = الجهاز الافتراضي بويندوز
     void         SetDeviceId(const std::wstring& id) { m_deviceId = id; }
     std::wstring DeviceId() const { return m_deviceId; }
@@ -52,13 +59,14 @@ public:
     // كل الأجهزة الشغّالة من هالنوع
     static std::vector<AudioDevice> ListDevices(Kind kind);
 
-    // "مسلّح" = عم يخزّن الصوت للتسجيل. clear = امسح المخزّن القديم
-    void SetArmed(bool armed, bool clear);
-
-    // للمسجّل: خود عدد frames من الصوت المخزّن (كل frame = يسار + يمين)
-    size_t Read(float* dst, size_t frames);
-    size_t Available();
-    void   KeepNewest(size_t frames);    // ارمي القديم إذا تجمّع كتير
+    // كل مستهلك (التسجيل، البث) بياخد "حنفية" إلها مخزن خاص
+    int    AddTap();
+    void   RemoveTap(int tap);
+    // "مسلّح" = عم يخزّن الصوت. clear = امسح المخزّن القديم
+    void   SetArmed(int tap, bool armed, bool clear);
+    // خود عدد frames من الصوت المخزّن (كل frame = يسار + يمين)
+    size_t Read(int tap, float* dst, size_t frames);
+    void   KeepNewest(int tap, size_t frames);    // ارمي القديم إذا تجمّع كتير
 
 private:
     void ThreadMain(std::promise<bool>* ready);   // ready: منقول فيه إذا الجهاز اشتغل
@@ -67,12 +75,19 @@ private:
 
     Kind               m_kind;
     std::atomic<bool>  m_running{ false };
-    std::atomic<bool>  m_armed{ false };
     std::atomic<float> m_peak{ 0.0f };
+    std::atomic<float> m_volume{ 1.0f };
+    std::atomic<bool>  m_muted{ false };
     std::thread        m_thread;
 
-    std::mutex         m_mutex;          // بيحمي m_fifo و m_name
-    std::deque<float>  m_fifo;           // الصوت المخزّن للتسجيل
+    struct Tap
+    {
+        std::deque<float> fifo;          // الصوت المخزّن
+        bool              armed = false;
+    };
+    std::mutex         m_mutex;          // بيحمي m_taps و m_name
+    std::map<int, Tap> m_taps;
+    int                m_nextTap = 1;
     std::wstring       m_name;
     std::wstring       m_deviceId;       // فاضي = الافتراضي
 

@@ -1,4 +1,4 @@
-﻿// =============================================================
+// =============================================================
 //  Audio.cpp - أخذ الصوت من ويندوز (WASAPI)
 // =============================================================
 #include "Audio.h"
@@ -58,36 +58,59 @@ std::wstring AudioSource::DeviceName()
     return m_name;
 }
 
-void AudioSource::SetArmed(bool armed, bool clear)
+// -------------------------------------------------------------
+// "الحنفيات" (Taps): كل مين بدو صوت (التسجيل، البث) إلو مخزن خاص فيه
+// لحتى ما ياخدوا الصوت من بعض
+// -------------------------------------------------------------
+int AudioSource::AddTap()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (clear)
-        m_fifo.clear();
-    m_armed = armed;
+    const int id = m_nextTap++;
+    m_taps[id] = Tap{};
+    return id;
 }
 
-size_t AudioSource::Read(float* dst, size_t frames)
+void AudioSource::RemoveTap(int tap)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    const size_t have = m_fifo.size() / CHANNELS;
+    m_taps.erase(tap);
+}
+
+void AudioSource::SetArmed(int tap, bool armed, bool clear)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_taps.find(tap);
+    if (it == m_taps.end())
+        return;
+    if (clear)
+        it->second.fifo.clear();
+    it->second.armed = armed;
+}
+
+size_t AudioSource::Read(int tap, float* dst, size_t frames)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_taps.find(tap);
+    if (it == m_taps.end())
+        return 0;
+    std::deque<float>& fifo = it->second.fifo;
+    const size_t have = fifo.size() / CHANNELS;
     const size_t n    = std::min(have, frames);
-    std::copy(m_fifo.begin(), m_fifo.begin() + n * CHANNELS, dst);
-    m_fifo.erase(m_fifo.begin(), m_fifo.begin() + n * CHANNELS);
+    std::copy(fifo.begin(), fifo.begin() + n * CHANNELS, dst);
+    fifo.erase(fifo.begin(), fifo.begin() + n * CHANNELS);
     return n;
 }
 
-size_t AudioSource::Available()
+void AudioSource::KeepNewest(int tap, size_t frames)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return m_fifo.size() / CHANNELS;
-}
-
-void AudioSource::KeepNewest(size_t frames)
-{
-    std::lock_guard<std::mutex> lock(m_mutex);
-    const size_t have = m_fifo.size() / CHANNELS;
+    auto it = m_taps.find(tap);
+    if (it == m_taps.end())
+        return;
+    std::deque<float>& fifo = it->second.fifo;
+    const size_t have = fifo.size() / CHANNELS;
     if (have > frames)
-        m_fifo.erase(m_fifo.begin(), m_fifo.begin() + (have - frames) * CHANNELS);
+        fifo.erase(fifo.begin(), fifo.begin() + (have - frames) * CHANNELS);
 }
 
 // -------------------------------------------------------------
@@ -118,13 +141,16 @@ void AudioSource::Process(const BYTE* data, UINT32 frames, bool silent)
     out.reserve((size_t)(frames / m_step + 4) * CHANNELS);
     float peak = 0.0f;
 
+    // علو الصوت: 0 = سكوت ، 1 = طبيعي ، 2 = ضعفين. والكتم = صفر
+    const float gain = m_muted ? 0.0f : m_volume.load();
+
     for (UINT32 f = 0; f < frames; ++f)
     {
         float l = 0.0f, r = 0.0f;
         if (!silent)
         {
-            l = SampleAt(data, f, 0);
-            r = m_srcChannels > 1 ? SampleAt(data, f, 1) : l;   // مايك مونو -> منكرّر القناة
+            l = SampleAt(data, f, 0) * gain;
+            r = (m_srcChannels > 1 ? SampleAt(data, f, 1) : SampleAt(data, f, 0)) * gain;   // مايك مونو -> منكرّر القناة
         }
         peak = std::max(peak, std::max(std::fabs(l), std::fabs(r)));
 
@@ -143,13 +169,15 @@ void AudioSource::Process(const BYTE* data, UINT32 frames, bool silent)
     if (peak > m_peak.load())
         m_peak = peak;
 
-    if (m_armed)
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& [id, tap] : m_taps)
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_fifo.insert(m_fifo.end(), out.begin(), out.end());
-        const size_t have = m_fifo.size() / CHANNELS;
+        if (!tap.armed)
+            continue;
+        tap.fifo.insert(tap.fifo.end(), out.begin(), out.end());
+        const size_t have = tap.fifo.size() / CHANNELS;
         if (have > MAX_FIFO_FRAMES)
-            m_fifo.erase(m_fifo.begin(), m_fifo.begin() + (have - MAX_FIFO_FRAMES) * CHANNELS);
+            tap.fifo.erase(tap.fifo.begin(), tap.fifo.begin() + (have - MAX_FIFO_FRAMES) * CHANNELS);
     }
 }
 

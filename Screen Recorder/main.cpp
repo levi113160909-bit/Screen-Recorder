@@ -1,4 +1,4 @@
-﻿// =============================================================
+// =============================================================
 //  Screen Recorder - main.cpp
 //  الواجهة: منرسمها بنفسنا بـ Direct2D (رسم حديث وسريع)
 //  و DirectWrite (كتابة النصوص، وبيدعم العربي صح)
@@ -27,8 +27,13 @@
 #include "Scene.h"
 #include "Audio.h"
 #include "Recorder.h"
+#include "Streamer.h"
+#include <wincrypt.h>
+#include <wincodec.h>
 
 #pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "shell32.lib")
@@ -65,6 +70,7 @@ namespace Icon
     const wchar_t* Window  = L"\uE8A7";
     const wchar_t* Speaker = L"\uE767";
     const wchar_t* Mic     = L"\uE720";
+    const wchar_t* Muted   = L"\uE74F";
     const wchar_t* Pause   = L"\uE769";
     const wchar_t* Play    = L"\uE768";
     const wchar_t* Folder  = L"\uE838";
@@ -72,6 +78,8 @@ namespace Icon
     const wchar_t* Delete  = L"\uE74D";
     const wchar_t* Eye     = L"\uE890";
     const wchar_t* Chevron = L"\uE70D";
+    const wchar_t* Live    = L"\uE93E";
+    const wchar_t* More    = L"\uE712";
 }
 
 // أرقام العناصر اللي بتنكبس
@@ -79,20 +87,25 @@ enum : int
 {
     ID_RECORD = 1, ID_PAUSE, ID_FOLDER, ID_ADD_SOURCE, ID_SYSTEM_AUDIO, ID_MIC,
     ID_SYSTEM_DEVICE, ID_MIC_DEVICE, ID_ENCODER_MENU,
-    ID_TAB_SOURCES = 10, ID_TAB_SETTINGS,     // التبويبات (لازم ورا بعض)
+    ID_TAB_SOURCES = 10, ID_TAB_STREAM, ID_TAB_SETTINGS,     // التبويبات (لازم ورا بعض)
     ID_BITRATE_MINUS, ID_BITRATE_PLUS, ID_ADD_SCENE,
+    ID_SYSTEM_MUTE, ID_MIC_MUTE, ID_SYSTEM_VOL, ID_MIC_VOL,
+    ID_STREAM, ID_ADD_TARGET, ID_STREAM_KBPS_MINUS, ID_STREAM_KBPS_PLUS,
     ID_CANVAS_FIRST  = 90,      // 4 خيارات
     ID_FPS_FIRST     = 100,     // 4 خيارات
     ID_QUALITY_FIRST = 110,     // 4 خيارات
     ID_CONTAINER_FIRST = 130,   // خيارين
+    ID_STREAM_RES_FIRST = 140,  // 3 خيارات (دقة البث)
     ID_LAYER_FIRST   = 1000,    // الطبقة رقم id = ID_LAYER_FIRST + id
     ID_EYE_FIRST     = 3000,
     ID_DELETE_FIRST  = 5000,
-    ID_SCENE_FIRST   = 7000     // المشهد رقم i = ID_SCENE_FIRST + i
+    ID_SCENE_FIRST   = 7000,    // المشهد رقم i = ID_SCENE_FIRST + i
+    ID_TARGET_TOGGLE_FIRST = 9000,   // تفعيل وجهة البث رقم i
+    ID_TARGET_MENU_FIRST   = 9500    // قائمة وجهة البث رقم i
 };
 
 constexpr UINT_PTR TIMER_FRAME = 1;
-constexpr int      HOTKEY_RECORD = 1, HOTKEY_PAUSE = 2;
+constexpr int      HOTKEY_RECORD = 1, HOTKEY_PAUSE = 2, HOTKEY_STREAM = 3;
 
 // =============================================================
 //  متغيرات البرنامج
@@ -105,7 +118,7 @@ ComPtr<ID2D1Factory>          g_d2d;
 ComPtr<IDWriteFactory>        g_dwrite;
 ComPtr<ID2D1HwndRenderTarget> g_rt;
 ComPtr<ID2D1SolidColorBrush>  g_brush;
-ComPtr<IDWriteTextFormat>     g_fTitle, g_fSection, g_fBody, g_fSmall, g_fSmallEnd, g_fCenter, g_fSegment,
+ComPtr<IDWriteTextFormat>     g_fTitle, g_fSection, g_fBody, g_fSmall, g_fSmallEnd, g_fSmallLtr, g_fCenter, g_fSegment,
                               g_fTimer, g_fIcon, g_fIconBig;
 
 // الماوس والأزرار
@@ -141,7 +154,17 @@ std::vector<double> g_guidesX, g_guidesY;   // خطوط المغناطيس ال�
 AudioSource g_systemAudio(AudioSource::Kind::System);
 AudioSource g_micAudio(AudioSource::Kind::Microphone);
 bool  g_systemOn = true, g_micOn = false;
+AudioSource* g_volDrag = nullptr;      // شريط العلو اللي عم نسحبه بالماوس
+D2D1_RECT_F  g_volTrack[2] = {};       // مكان شريط العلو (0 = النظام ، 1 = الميكروفون)
 float g_systemLevel = 0, g_micLevel = 0;
+
+// البث المباشر
+Streamer                  g_streamer;
+std::vector<StreamTarget> g_targets;            // كل الوجهات (المفعّلة والمطفية)
+std::vector<int>          g_liveTargets;        // أرقام الوجهات اللي عم نبث عليها هلق
+std::vector<OutputStatus> g_streamStatus;       // حالة كل وجهة شغّالة
+int                       g_streamRes  = 1;     // 0 = بحجم اللوحة ، 1 = 1080p ، 2 = 720p
+UINT32                    g_streamKbps = 6000;  // معدّل البت للبث (كيلوبت/ث)
 
 // التسجيل
 Recorder     g_recorder;
@@ -162,7 +185,7 @@ HICON g_icons[3][2] = {};              // [عادي / عم يسجّل / متوق
 int   g_iconState = -1;
 
 int g_tick = 0;
-int g_tab  = 0;      // 0 = المصادر ، 1 = الإعدادات
+int g_tab  = 0;      // 0 = المصادر ، 1 = البث ، 2 = الإعدادات
 
 // -------- الإعدادات (بتنحفظ بملف settings.ini) --------
 const UINT32 FPS_OPTIONS[]    = { 0, 24, 30, 60 };          // 0 = تلقائي
@@ -179,6 +202,9 @@ std::vector<Recorder::EncoderInfo> g_encoders;
 std::wstring g_settingsPath;
 
 void SaveSettings();   // معرّفة تحت
+
+// في شي شغّال (تسجيل أو بث)؟ وقتها منقفل الإعدادات اللي بتأثّر عليهم
+bool Busy() { return g_recorder.IsRecording() || g_streamer.IsActive(); }
 
 // =============================================================
 //  أدوات رسم صغيرة
@@ -256,6 +282,7 @@ void CreateTextFormats()
     g_fBody     = MakeFormat(14, DWRITE_FONT_WEIGHT_NORMAL, true, LEAD);
     g_fSmall    = MakeFormat(12, DWRITE_FONT_WEIGHT_NORMAL, true, LEAD);
     g_fSmallEnd = MakeFormat(12, DWRITE_FONT_WEIGHT_NORMAL, true, DWRITE_TEXT_ALIGNMENT_TRAILING);   // على اليسار
+    g_fSmallLtr = MakeFormat(11.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false, DWRITE_TEXT_ALIGNMENT_CENTER);
     g_fSegment  = MakeFormat(12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, MID);
     g_fCenter   = MakeFormat(14, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, MID);
     g_fTimer    = MakeFormat(26, DWRITE_FONT_WEIGHT_SEMI_BOLD, false, MID);
@@ -287,9 +314,13 @@ float TextWidth(const std::wstring& s, IDWriteTextFormat* f)
 const wchar_t MENU_CLASS[] = L"ScreenRecorderMenu";
 constexpr float MENU_ITEM_H = 34, MENU_SEP_H = 9, MENU_PAD = 6;
 
+// أيقونة المنصة (معرّفة تحت) - منستعملها بالقوائم كمان
+void DrawPlatformIcon(int platform, const D2D1_RECT_F& r, bool enabled);
+
 struct MenuState
 {
     std::vector<std::wstring> items;
+    std::vector<int>          icons;     // أيقونة منصة لكل خيار (-1 = بلا)
     int   checked = -1;
     int   hover   = -1;
     int   result  = -1;
@@ -362,7 +393,14 @@ void PaintMenu(HWND hwnd, MenuState& m)
             Fill(Rect(row.right - 3, row.top + 8, row.right, row.bottom - 8), Theme::Accent, 1.5f);   // خط أزرق
             Text(L"\uE73E", g_fIcon.Get(), Rect(row.right - 32, row.top, row.right - 6, row.bottom), Theme::Accent);
         }
-        Text(m.items[i], g_fBody.Get(), Rect(row.left + 12, row.top, row.right - 36, row.bottom),
+        float textRight = row.right - 36;
+        if (i < (int)m.icons.size() && m.icons[i] >= 0)
+        {
+            const float cy = (row.top + row.bottom) / 2;
+            DrawPlatformIcon(m.icons[i], Rect(row.right - 34, cy - 12, row.right - 10, cy + 12), true);
+            textRight = row.right - 44;
+        }
+        Text(m.items[i], g_fBody.Get(), Rect(row.left + 12, row.top, textRight, row.bottom),
              i == m.checked ? Theme::Accent : Theme::Text);
     }
 
@@ -451,10 +489,11 @@ LRESULT CALLBACK MenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-int ShowMenu(const std::vector<std::wstring>& items, int checked, POINT screenPt)
+int ShowMenu(const std::vector<std::wstring>& items, int checked, POINT screenPt, const std::vector<int>& icons = {})
 {
     MenuState m;
     m.items   = items;
+    m.icons   = icons;
     m.checked = checked;
 
     // دقة الشاشة اللي عليها النقطة
@@ -607,7 +646,8 @@ LRESULT CALLBACK InputProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 }
 
 // بترجّع true إذا المستخدم ضغط Enter
-bool InputBox(const std::wstring& title, std::wstring& text)
+// password = نخفي الحروف (مفتاح البث) ، ltr = نص إنكليزي (روابط ومفاتيح)
+bool InputBox(const std::wstring& title, std::wstring& text, bool password = false, bool ltr = false, int limit = 60)
 {
     InputState st;
     st.title = title;
@@ -616,7 +656,7 @@ bool InputBox(const std::wstring& title, std::wstring& text)
     GetWindowRect(g_hwnd, &owner);
     st.dpi = GetDpiForWindow(g_hwnd);
     auto S = [&](float v) { return (int)(v * st.dpi / 96.0f); };
-    const int w = S(380), h = S(112);
+    const int w = S(ltr ? 460 : 380), h = S(112);
     const int x = (owner.left + owner.right - w) / 2;
     const int y = (owner.top + owner.bottom - h) / 2;
 
@@ -630,11 +670,15 @@ bool InputBox(const std::wstring& title, std::wstring& text)
 
     st.font      = CreateFontW(-S(15), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     st.editBrush = CreateSolidBrush(RGB(0x1D, 0x21, 0x29));
-    st.edit = CreateWindowExW(WS_EX_RTLREADING, L"EDIT", text.c_str(), WS_CHILD | WS_VISIBLE | ES_RIGHT | ES_AUTOHSCROLL,
+    DWORD style = WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | (ltr ? ES_LEFT : ES_RIGHT);
+    if (password) style |= ES_PASSWORD;
+    st.edit = CreateWindowExW(ltr ? 0 : WS_EX_RTLREADING, L"EDIT", text.c_str(), style,
                               S(26), S(50), w - S(52), S(22), hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
     SendMessageW(st.edit, WM_SETFONT, (WPARAM)st.font, TRUE);
+    if (password)
+        SendMessageW(st.edit, EM_SETPASSWORDCHAR, (WPARAM)L'•', 0);
     SendMessageW(st.edit, EM_SETSEL, 0, -1);              // النص كلّه محدّد
-    SendMessageW(st.edit, EM_LIMITTEXT, 60, 0);
+    SendMessageW(st.edit, EM_LIMITTEXT, limit, 0);
 
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
@@ -666,9 +710,9 @@ bool InputBox(const std::wstring& title, std::wstring& text)
 
     if (st.ok)
     {
-        wchar_t buf[128] = {};
-        GetWindowTextW(st.edit, buf, 128);
-        text = buf;
+        std::vector<wchar_t> buf(limit + 2, L'\0');
+        GetWindowTextW(st.edit, buf.data(), limit + 1);
+        text = buf.data();
     }
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     st.brush.Reset();
@@ -778,14 +822,19 @@ void CreateAppIcons()
 
 void UpdateAppIcon()
 {
-    const int state = !g_recorder.IsRecording() ? 0 : (g_recorder.IsPaused() ? 2 : 1);
+    // 0 جاهز ، 1 عم يسجّل ، 2 متوقف مؤقتاً ، 3 بث مباشر بس (بدون تسجيل)
+    int state = !g_recorder.IsRecording() ? 0 : (g_recorder.IsPaused() ? 2 : 1);
+    if (state == 0 && g_streamer.IsActive())
+        state = 3;
     if (state == g_iconState)
         return;
     g_iconState = state;
-    SendMessageW(g_hwnd, WM_SETICON, ICON_BIG,   (LPARAM)g_icons[state][0]);
-    SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_icons[state][1]);
-    SetWindowTextW(g_hwnd, state == 0 ? L"مسجّل الشاشة" : (state == 1 ? L"● جارٍ التسجيل - مسجّل الشاشة"
-                                                                        : L"❚❚ متوقف مؤقتاً - مسجّل الشاشة"));
+    const int icon = state == 3 ? 1 : state;
+    SendMessageW(g_hwnd, WM_SETICON, ICON_BIG,   (LPARAM)g_icons[icon][0]);
+    SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_icons[icon][1]);
+    const wchar_t* titles[] = { L"مسجّل الشاشة", L"● جارٍ التسجيل - مسجّل الشاشة",
+                                L"❚❚ متوقف مؤقتاً - مسجّل الشاشة", L"● بث مباشر - مسجّل الشاشة" };
+    SetWindowTextW(g_hwnd, titles[state]);
 }
 
 // =============================================================
@@ -1310,6 +1359,12 @@ void SaveSettings()
     put(L"Microphone",  g_micOn ? L"1" : L"0");
     put(L"SystemDevice", g_systemAudio.DeviceId());
     put(L"MicDevice",    g_micAudio.DeviceId());
+    put(L"SystemVolume", std::to_wstring((int)std::lround(g_systemAudio.Volume() * 100)));
+    put(L"MicVolume",    std::to_wstring((int)std::lround(g_micAudio.Volume() * 100)));
+    put(L"SystemMuted",  g_systemAudio.IsMuted() ? L"1" : L"0");
+    put(L"MicMuted",     g_micAudio.IsMuted() ? L"1" : L"0");
+    put(L"StreamRes",    std::to_wstring(g_streamRes));
+    put(L"StreamKbps",   std::to_wstring(g_streamKbps));
 }
 
 void LoadSettings()
@@ -1345,6 +1400,12 @@ void LoadSettings()
     g_micOn        = getInt(L"Microphone", 0) != 0;
     g_systemAudio.SetDeviceId(getStr(L"SystemDevice"));
     g_micAudio.SetDeviceId(getStr(L"MicDevice"));
+    g_systemAudio.SetVolume(std::clamp(getInt(L"SystemVolume", 100), 0, 200) / 100.0f);
+    g_micAudio.SetVolume(std::clamp(getInt(L"MicVolume", 100), 0, 200) / 100.0f);
+    g_systemAudio.SetMuted(getInt(L"SystemMuted", 0) != 0);
+    g_micAudio.SetMuted(getInt(L"MicMuted", 0) != 0);
+    g_streamRes  = std::clamp(getInt(L"StreamRes", 1), 0, 2);
+    g_streamKbps = (UINT32)std::clamp(getInt(L"StreamKbps", 6000), 1000, 20000);
 }
 
 // =============================================================
@@ -1352,8 +1413,8 @@ void LoadSettings()
 // =============================================================
 void SetAudioEnabled(AudioSource& src, bool& flag, bool on)
 {
-    if (g_recorder.IsRecording())
-        return;                     // ما منغيّر الصوت بنص التسجيل
+    if (Busy())
+        return;                     // ما منغيّر الصوت بنص التسجيل أو البث
     flag = on;
     if (on) src.Start();
     else    src.Stop();
@@ -1363,7 +1424,7 @@ void SetAudioEnabled(AudioSource& src, bool& flag, bool on)
 // قائمة اختيار الجهاز (سماعات أو ميكروفون)
 void ShowDeviceMenu(AudioSource& src, bool on, AudioSource::Kind kind, POINT pt)
 {
-    if (g_recorder.IsRecording())
+    if (Busy())
         return;
     const std::vector<AudioDevice> devices = AudioSource::ListDevices(kind);
     std::vector<std::wstring> items = { L"الجهاز الافتراضي في ويندوز" };
@@ -1533,6 +1594,417 @@ void TogglePause()
     UpdateAppIcon();
 }
 
+
+// =============================================================
+//  البث المباشر: الوجهات (يوتيوب، تيك توك...)
+// =============================================================
+
+// مفتاح البث سرّي: منشفّره بـ DPAPI (بس حسابك بويندوز بيقدر يفكّه)
+std::wstring ProtectText(const std::wstring& plain)
+{
+    if (plain.empty())
+        return L"";
+    DATA_BLOB in{ (DWORD)(plain.size() * sizeof(wchar_t)), (BYTE*)plain.data() }, out{};
+    if (!CryptProtectData(&in, L"stream key", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out))
+        return L"";
+    DWORD len = 0;
+    CryptBinaryToStringW(out.pbData, out.cbData, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &len);
+    std::wstring b64(len, L'\0');
+    CryptBinaryToStringW(out.pbData, out.cbData, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, b64.data(), &len);
+    b64.resize(len);
+    LocalFree(out.pbData);
+    return b64;
+}
+
+std::wstring UnprotectText(const std::wstring& b64)
+{
+    if (b64.empty())
+        return L"";
+    DWORD len = 0;
+    if (!CryptStringToBinaryW(b64.c_str(), 0, CRYPT_STRING_BASE64, nullptr, &len, nullptr, nullptr))
+        return L"";
+    std::vector<BYTE> bin(len);
+    if (!CryptStringToBinaryW(b64.c_str(), 0, CRYPT_STRING_BASE64, bin.data(), &len, nullptr, nullptr))
+        return L"";
+    DATA_BLOB in{ len, bin.data() }, out{};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out))
+        return L"";
+    std::wstring plain((wchar_t*)out.pbData, out.cbData / sizeof(wchar_t));
+    SecureZeroMemory(out.pbData, out.cbData);
+    LocalFree(out.pbData);
+    return plain;
+}
+
+std::wstring TargetsPath()
+{
+    std::wstring path = ScenesPath();
+    const size_t slash = path.find_last_of(L'\\');
+    return slash == std::wstring::npos ? L"" : path.substr(0, slash) + L"\\streams.txt";
+}
+
+void SaveTargets()
+{
+    const std::wstring path = TargetsPath();
+    FILE* f = nullptr;
+    if (path.empty() || _wfopen_s(&f, path.c_str(), L"w, ccs=UTF-8") != 0 || !f)
+        return;
+    for (const StreamTarget& t : g_targets)
+        fwprintf(f, L"T\t%d\t%d\t%ls\t%ls\t%ls\n", (int)t.platform, t.enabled ? 1 : 0,
+                 Clean(t.name).c_str(), Clean(t.url).c_str(), ProtectText(t.key).c_str());
+    fclose(f);
+}
+
+void LoadTargets()
+{
+    g_targets.clear();
+    const std::wstring path = TargetsPath();
+    FILE* f = nullptr;
+    if (path.empty() || _wfopen_s(&f, path.c_str(), L"r, ccs=UTF-8") != 0 || !f)
+        return;
+    wchar_t buf[8192];
+    while (fgetws(buf, 8192, f))
+    {
+        std::wstring line = buf;
+        while (!line.empty() && (line.back() == L'\n' || line.back() == L'\r'))
+            line.pop_back();
+        const std::vector<std::wstring> p = SplitTabs(line);
+        if (p.size() < 6 || p[0] != L"T")
+            continue;
+        StreamTarget t;
+        t.platform = (Platform)std::clamp(_wtoi(p[1].c_str()), 0, (int)Platform::Custom);
+        t.enabled  = _wtoi(p[2].c_str()) != 0;
+        t.name     = p[3];
+        t.url      = p[4];
+        t.key      = UnprotectText(p[5]);
+        g_targets.push_back(t);
+    }
+    fclose(f);
+}
+
+D2D1_COLOR_F PlatformColor(Platform p)
+{
+    switch (p)
+    {
+    case Platform::YouTube:  return D2D1::ColorF(0xFF0033);
+    case Platform::Twitch:   return D2D1::ColorF(0x9146FF);
+    case Platform::Facebook: return D2D1::ColorF(0x1877F2);
+    case Platform::Kick:     return D2D1::ColorF(0x53FC18);
+    case Platform::TikTok:   return D2D1::ColorF(0xFE2C55);
+    default:                 return Theme::Accent;
+    }
+}
+
+// أيقونات المنصات:
+//  - إذا حطّيت صورة الشعار الرسمي بمجلد الأيقونات (youtube.png ...) منستعملها
+//  - غير هيك منرسم أيقونة بسيطة بلون المنصة
+const wchar_t* PLATFORM_FILES[] = { L"youtube", L"twitch", L"facebook", L"kick", L"tiktok", L"custom" };
+constexpr int  PLATFORM_COUNT = 6;
+
+ComPtr<IWICImagingFactory>    g_wic;
+ComPtr<IWICFormatConverter>   g_logoSrc[PLATFORM_COUNT];
+bool                          g_logoTried[PLATFORM_COUNT] = {};
+ComPtr<ID2D1RenderTarget>     g_logoRt;                  // الرسّام اللي انعملت عليه الصور
+ComPtr<ID2D1Bitmap>           g_logoBmp[PLATFORM_COUNT];
+
+std::wstring IconsFolder()
+{
+    std::wstring path = ScenesPath();
+    const size_t slash = path.find_last_of(L'\\');
+    if (slash == std::wstring::npos)
+        return L"";
+    path = path.substr(0, slash) + L"\\icons";
+    CreateDirectoryW(path.c_str(), nullptr);
+    return path;
+}
+
+// بنقرا صورة الشعار مرة وحدة (إذا موجودة)
+IWICFormatConverter* LogoSource(int p)
+{
+    if (g_logoTried[p])
+        return g_logoSrc[p].Get();
+    g_logoTried[p] = true;
+    if (!g_wic && FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_wic))))
+        return nullptr;
+    const std::wstring folder = IconsFolder();
+    if (folder.empty())
+        return nullptr;
+    for (const wchar_t* ext : { L".png", L".ico", L".jpg" })
+    {
+        const std::wstring file = folder + L"\\" + PLATFORM_FILES[p] + ext;
+        if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES)
+            continue;
+        ComPtr<IWICBitmapDecoder> decoder;
+        ComPtr<IWICBitmapFrameDecode> frame;
+        ComPtr<IWICFormatConverter> conv;
+        if (SUCCEEDED(g_wic->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder)) &&
+            SUCCEEDED(decoder->GetFrame(0, &frame)) &&
+            SUCCEEDED(g_wic->CreateFormatConverter(&conv)) &&
+            SUCCEEDED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeMedianCut)))
+        {
+            g_logoSrc[p] = conv;
+            break;
+        }
+    }
+    return g_logoSrc[p].Get();
+}
+
+void DrawPlatformIcon(int p, const D2D1_RECT_F& r, bool enabled)
+{
+    if (p < 0 || p >= PLATFORM_COUNT || !g_rt)
+        return;
+
+    // 1) صورة الشعار من المجلد
+    if (IWICFormatConverter* src = LogoSource(p))
+    {
+        if (g_logoRt.Get() != g_rt.Get())      // رسّام جديد (قائمة منبثقة مثلاً): منعيد الصور
+        {
+            g_logoRt = g_rt;
+            for (auto& b : g_logoBmp) b.Reset();
+        }
+        if (!g_logoBmp[p])
+            g_rt->CreateBitmapFromWicBitmap(src, nullptr, &g_logoBmp[p]);
+        if (g_logoBmp[p])
+        {
+            const D2D1_SIZE_F bs = g_logoBmp[p]->GetSize();
+            const float bw = r.right - r.left, bh = r.bottom - r.top;
+            const float k  = std::min(bw / bs.width, bh / bs.height);
+            const float w  = bs.width * k, h = bs.height * k;
+            const float x  = r.left + (bw - w) / 2, y = r.top + (bh - h) / 2;
+            g_rt->DrawBitmap(g_logoBmp[p].Get(), Rect(x, y, x + w, y + h), enabled ? 1.0f : 0.4f,
+                             D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            return;
+        }
+    }
+
+    // 2) أيقونة بسيطة بلون المنصة
+    static const wchar_t* glyphs[PLATFORM_COUNT] = {
+        L"\uE714",   // يوتيوب: فيديو
+        L"\uE7FC",   // تويتش: ألعاب
+        L"\uE716",   // فيسبوك: أشخاص
+        L"\uE945",   // كيك: برق
+        L"\uE8D6",   // تيك توك: موسيقى
+        L"\uE774" }; // مخصّص: إنترنت
+    const D2D1_COLOR_F c = PlatformColor((Platform)p);
+    const float size = r.bottom - r.top;
+    Fill(r, WithAlpha(c, enabled ? 1.0f : 0.35f), size * 0.26f);
+    Text(glyphs[p], size >= 30 ? g_fIconBig.Get() : g_fIcon.Get(), r,
+         (Platform)p == Platform::Kick ? D2D1::ColorF(0x0E1014) : Theme::White);
+}
+
+// وين بيلاقي المستخدم المفتاح (بيبيّن فوق مربع الكتابة)
+std::wstring KeyPrompt(const StreamTarget& t)
+{
+    switch (t.platform)
+    {
+    case Platform::YouTube:  return L"مفتاح البث (YouTube Studio ← بث مباشر)";
+    case Platform::Twitch:   return L"مفتاح البث (لوحة تحكم Twitch ← البث)";
+    case Platform::Facebook: return L"مفتاح البث (Live Producer في فيسبوك)";
+    case Platform::Kick:     return L"مفتاح البث (Kick ← الإعدادات ← مفتاح البث)";
+    case Platform::TikTok:   return L"مفتاح البث (TikTok LIVE Studio / LIVE Center)";
+    default:                 return L"مفتاح البث";
+    }
+}
+
+bool EditTargetUrl(StreamTarget& t)
+{
+    std::wstring url = t.url;
+    const std::wstring title = t.platform == Platform::Kick   ? L"عنوان الخادم (Stream URL من Kick)"
+                             : t.platform == Platform::TikTok ? L"عنوان الخادم (Server URL من TikTok)"
+                                                              : L"عنوان الخادم (rtmp:// أو rtmps://)";
+    if (!InputBox(title, url, false, true, 512))
+        return false;
+    t.url = url;
+    return true;
+}
+
+bool EditTargetKey(StreamTarget& t)
+{
+    std::wstring key = t.key;
+    if (!InputBox(KeyPrompt(t), key, true, true, 1024))
+        return false;
+    t.key = key;
+    return true;
+}
+
+void AddTarget(POINT pt)
+{
+    if (g_streamer.IsActive())
+    {
+        ShowMessage(L"أوقف البث أولاً لإضافة وجهة", true);
+        return;
+    }
+    const Platform list[] = { Platform::YouTube, Platform::Twitch, Platform::Facebook,
+                              Platform::Kick, Platform::TikTok, Platform::Custom };
+    std::vector<std::wstring> items;
+    std::vector<int> icons;
+    for (Platform p : list)
+    {
+        items.push_back(p == Platform::Custom ? L"خادم مخصّص (RTMP)" : PlatformName(p));
+        icons.push_back((int)p);
+    }
+    const int pick = ShowMenu(items, -1, pt, icons);
+    if (pick < 0)
+        return;
+
+    StreamTarget t;
+    t.platform = list[pick];
+    t.name     = PlatformName(t.platform);
+    t.url      = DefaultServer(t.platform);
+    t.enabled  = true;
+    if (t.url.empty() && !EditTargetUrl(t))
+        return;
+    EditTargetKey(t);              // إذا لغاه بيقدر يحطّه بعدين من القائمة
+    g_targets.push_back(t);
+    SaveTargets();
+}
+
+void ShowTargetMenu(int index, POINT pt)
+{
+    if (index < 0 || index >= (int)g_targets.size())
+        return;
+    if (g_streamer.IsActive())
+    {
+        ShowMessage(L"أوقف البث أولاً لتعديل الوجهات", true);
+        return;
+    }
+    StreamTarget& t = g_targets[index];
+    const int pick = ShowMenu({ L"مفتاح البث", L"عنوان الخادم", L"إعادة التسمية", L"", L"حذف الوجهة" }, -1, pt);
+    switch (pick)
+    {
+    case 0: if (EditTargetKey(t)) SaveTargets(); break;
+    case 1: if (EditTargetUrl(t)) SaveTargets(); break;
+    case 2:
+    {
+        std::wstring name = t.name;
+        if (InputBox(L"اسم الوجهة", name) && !name.empty())
+        {
+            t.name = name;
+            SaveTargets();
+        }
+        break;
+    }
+    case 4:
+        g_targets.erase(g_targets.begin() + index);
+        SaveTargets();
+        break;
+    }
+}
+
+void ToggleTarget(int index)
+{
+    if (index < 0 || index >= (int)g_targets.size())
+        return;
+    if (g_streamer.IsActive())
+    {
+        ShowMessage(L"أوقف البث أولاً لتغيير الوجهات", true);
+        return;
+    }
+    g_targets[index].enabled = !g_targets[index].enabled;
+    SaveTargets();
+}
+
+// دقة البث حسب الاختيار (بنفس نسبة اللوحة)
+void StreamSize(UINT32& w, UINT32& h)
+{
+    int cw, ch;
+    {
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        cw = g_scene.canvasW;
+        ch = g_scene.canvasH;
+    }
+    w = (UINT32)cw;
+    h = (UINT32)ch;
+    const int wantH = g_streamRes == 1 ? 1080 : (g_streamRes == 2 ? 720 : 0);
+    // اللوحة العمودية (تيك توك): منحسب على العرض بدل الطول
+    const bool vertical = ch > cw;
+    const int  base     = vertical ? cw : ch;
+    if (wantH > 0 && base > wantH)
+    {
+        w = (UINT32)((double)cw * wantH / base);
+        h = (UINT32)((double)ch * wantH / base);
+    }
+    w &= ~1u;
+    h &= ~1u;
+}
+
+void StartStreaming()
+{
+    if (g_streamer.IsActive())
+        return;
+
+    StreamOptions opt;
+    opt.scene  = &g_scene;
+    opt.notify = g_hwnd;
+    g_liveTargets.clear();
+    for (size_t i = 0; i < g_targets.size(); ++i)
+        if (g_targets[i].enabled)
+        {
+            opt.targets.push_back(g_targets[i]);
+            g_liveTargets.push_back((int)i);
+        }
+    if (opt.targets.empty())
+    {
+        g_tab = 1;
+        ShowMessage(g_targets.empty() ? L"أضف وجهة بث أولاً (يوتيوب، تيك توك...)" : L"فعّل وجهة بث واحدة على الأقل", true);
+        return;
+    }
+    StreamSize(opt.width, opt.height);
+    opt.fps       = std::min<UINT32>(CurrentFps(), 60);
+    opt.videoKbps = g_streamKbps;
+    opt.encoder   = (EncoderMode)g_encoderMode;
+    if (g_systemOn && g_systemAudio.IsRunning()) opt.audio.push_back(&g_systemAudio);
+    if (g_micOn && g_micAudio.IsRunning())       opt.audio.push_back(&g_micAudio);
+
+    std::wstring error;
+    if (g_streamer.Start(opt, error))
+    {
+        g_streamStatus.clear();
+        ShowMessage(opt.targets.size() == 1 ? L"بدأ البث إلى " + opt.targets[0].name
+                                            : L"بدأ البث إلى " + std::to_wstring(opt.targets.size()) + L" منصات", false);
+    }
+    else
+    {
+        g_liveTargets.clear();
+        g_tab = 1;
+        ShowMessage(error, true);
+    }
+    UpdateAppIcon();
+}
+
+void StopStreaming(const std::wstring& message = L"انتهى البث")
+{
+    if (!g_streamer.IsActive())
+        return;
+    g_streamer.Stop();
+    g_liveTargets.clear();
+    g_streamStatus.clear();
+    ShowMessage(message, false);
+    UpdateAppIcon();
+}
+
+void ToggleStreaming()
+{
+    if (g_streamer.IsActive()) StopStreaming();
+    else                       StartStreaming();
+}
+
+// حالة الوجهة رقم index إذا عم نبث عليها
+const OutputStatus* TargetStatus(int index)
+{
+    for (size_t k = 0; k < g_liveTargets.size(); ++k)
+        if (g_liveTargets[k] == index && k < g_streamStatus.size())
+            return &g_streamStatus[k];
+    return nullptr;
+}
+
+int LiveCount()
+{
+    int n = 0;
+    for (const OutputStatus& st : g_streamStatus)
+        if (st.state == OutputState::Live) ++n;
+    return n;
+}
+
 void OpenFolder()
 {
     if (!g_lastFile.empty() && GetFileAttributesW(g_lastFile.c_str()) != INVALID_FILE_ATTRIBUTES)
@@ -1581,6 +2053,19 @@ void DrawTopBar(float W)
 
     Text(FormatTime(g_recorder.ElapsedMs()), g_fTimer.Get(), Rect(156, 10, 300, 58),
          rec ? Theme::Text : Theme::SubText);
+
+    // شارة البث المباشر: "مباشر 00:12:34"
+    if (g_streamer.IsActive())
+    {
+        const int  live  = LiveCount();
+        const D2D1_COLOR_F c = live > 0 ? D2D1::ColorF(0xFF3B5C) : Theme::Yellow;
+        const D2D1_RECT_F lp = Rect(312, 18, 492, 50);
+        Fill(lp, WithAlpha(c, 0.16f), 16);
+        if (live == 0 || (g_tick / 15) % 2 == 0)
+            Circle(lp.right - 18, 34, 5, c);
+        Text(live > 0 ? L"مباشر" : L"اتصال…", g_fSegment.Get(), Rect(lp.right - 80, lp.top, lp.right - 26, lp.bottom), c);
+        Text(FormatTime(g_streamer.ElapsedMs()), g_fSmallLtr.Get(), Rect(lp.left + 8, lp.top, lp.right - 84, lp.bottom), Theme::Text);
+    }
 }
 
 // مستطيل الطبقة بإحداثيات الشاشة (DIP)
@@ -1730,18 +2215,25 @@ void DrawMeter(const D2D1_RECT_F& r, float level, bool active)
 
 // ---------- سطر مصدر صوت ----------
 void DrawAudioRow(const D2D1_RECT_F& r, const wchar_t* icon, const wchar_t* title, AudioSource& src,
-                  bool on, float level, int toggleId, int deviceId)
+                  bool on, float level, int toggleId, int deviceId, int muteId, int volId, int index)
 {
-    const bool locked = g_recorder.IsRecording();
+    const bool locked = Busy();
+    const bool muted  = src.IsMuted();
     Fill(r, Theme::Card, 10);
 
-    Text(icon, g_fIconBig.Get(), Rect(r.right - 44, r.top + 6, r.right - 10, r.top + 38), on ? Theme::Text : Theme::SubText);
+    // الأيقونة = زر الكتم (بيشتغل حتى وقت التسجيل)
+    const D2D1_RECT_F mute = Rect(r.right - 46, r.top + 6, r.right - 8, r.top + 40);
+    if (AddHit(mute, muteId))
+        Fill(mute, Theme::Hover, 8);
+    Text(muted ? Icon::Muted : icon, g_fIconBig.Get(), mute,
+         muted ? Theme::Red : (on ? Theme::Text : Theme::SubText));
     Text(title, g_fBody.Get(), Rect(r.left + 96, r.top + 6, r.right - 50, r.top + 26), Theme::Text);
 
     std::wstring sub;
     D2D1_COLOR_F subColor = Theme::SubText;
     if (!on)                    sub = L"معطّل";
     else if (!src.IsRunning()) { sub = L"لم يُعثر على جهاز"; subColor = Theme::Red; }
+    else if (muted)            { sub = L"مكتوم"; subColor = Theme::Red; }
     else                        sub = src.DeviceName();
     Text(sub, g_fSmall.Get(), Rect(r.left + 96, r.top + 26, r.right - 50, r.top + 44), subColor);
 
@@ -1756,7 +2248,43 @@ void DrawAudioRow(const D2D1_RECT_F& r, const wchar_t* icon, const wchar_t* titl
         Fill(dev, Theme::Hover, 8);
     Text(Icon::Chevron, g_fIcon.Get(), dev, locked ? Theme::Off : Theme::SubText);
 
-    DrawMeter(Rect(r.left + 12, r.bottom - 14, r.right - 12, r.bottom - 8), level, on && src.IsRunning());
+    // ---- شريط العلو + مؤشر الصوت جوّاته ----
+    // من اليمين لليسار: 0% على اليمين و200% على اليسار
+    const float cy = r.bottom - 20;
+    const D2D1_RECT_F track = Rect(r.left + 58, cy - 3, r.right - 14, cy + 3);
+    const float tw = track.right - track.left;
+    g_volTrack[index] = track;
+    AddHit(Rect(track.left - 8, cy - 12, track.right + 8, cy + 12), volId);
+
+    const bool active = on && src.IsRunning() && !muted;
+    Fill(track, Theme::Border, 3);
+    if (active && level > 0)       // مستوى الصوت الحالي (بعد العلو)
+    {
+        const D2D1_COLOR_F c = level < 0.7f ? Theme::Green : (level < 0.9f ? Theme::Yellow : Theme::Red);
+        Fill(Rect(track.right - tw * level, track.top, track.right, track.bottom), WithAlpha(c, 0.85f), 3);
+    }
+
+    // المقبض
+    const float vol = src.Volume();
+    const float kx = track.right - tw * (vol / 2.0f);
+    const bool  dragging = (g_volDrag == &src);
+    Circle(kx, cy, dragging ? 8.0f : 7.0f, muted ? Theme::Off : Theme::White);
+    Circle(kx, cy, 3.0f, muted ? Theme::SubText : Theme::Accent);
+
+    // النسبة
+    Text(std::to_wstring((int)std::lround(vol * 100)) + L"%", g_fSmallLtr.Get(),
+         Rect(r.left + 8, cy - 10, r.left + 54, cy + 10), muted ? Theme::Off : (dragging ? Theme::Accent : Theme::SubText));
+}
+
+// من مكان الماوس لعلو الصوت (مع مغناطيس على 100%)
+void SetVolumeFromX(AudioSource& src, const D2D1_RECT_F& track, float x)
+{
+    float f = (track.right - x) / (track.right - track.left);
+    f = std::clamp(f, 0.0f, 1.0f);
+    float vol = f * 2.0f;
+    if (std::fabs(vol - 1.0f) < 0.05f)
+        vol = 1.0f;
+    src.SetVolume(vol);
 }
 
 // ---------- أزرار متلاصقة (نختار واحد منها) ----------
@@ -1786,7 +2314,7 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
     Fill(add, AddHit(add, ID_ADD_SOURCE) ? D2D1::ColorF(0x6A9DFF) : Theme::Accent, 8);
     Text(L"+  إضافة مصدر", g_fSegment.Get(), add, Theme::White);
 
-    const float audioHeight = 196;
+    const float audioHeight = 226;
     g_listRect = Rect(side.left + 8, y + 38, side.right - 8, side.bottom - audioHeight);
 
     std::vector<SceneLayer> layers;
@@ -1852,16 +2380,16 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
     const float ay = side.bottom - audioHeight;
     Fill(Rect(side.left + 16, ay + 4, side.right - 16, ay + 5), Theme::Border);
     Text(L"الصوت", g_fSection.Get(), Rect(side.left + 18, ay + 10, side.right - 18, ay + 36), Theme::SubText);
-    DrawAudioRow(Rect(side.left + 8, ay + 40, side.right - 8, ay + 110), Icon::Speaker, L"صوت النظام",
-                 g_systemAudio, g_systemOn, g_systemLevel, ID_SYSTEM_AUDIO, ID_SYSTEM_DEVICE);
-    DrawAudioRow(Rect(side.left + 8, ay + 116, side.right - 8, ay + 186), Icon::Mic, L"الميكروفون",
-                 g_micAudio, g_micOn, g_micLevel, ID_MIC, ID_MIC_DEVICE);
+    DrawAudioRow(Rect(side.left + 8, ay + 40, side.right - 8, ay + 124), Icon::Speaker, L"صوت النظام",
+                 g_systemAudio, g_systemOn, g_systemLevel, ID_SYSTEM_AUDIO, ID_SYSTEM_DEVICE, ID_SYSTEM_MUTE, ID_SYSTEM_VOL, 0);
+    DrawAudioRow(Rect(side.left + 8, ay + 130, side.right - 8, ay + 214), Icon::Mic, L"الميكروفون",
+                 g_micAudio, g_micOn, g_micLevel, ID_MIC, ID_MIC_DEVICE, ID_MIC_MUTE, ID_MIC_VOL, 1);
 }
 
 // ---------- تبويب الإعدادات ----------
 void DrawSettingsTab(const D2D1_RECT_F& side, float y)
 {
-    const bool  locked = g_recorder.IsRecording();
+    const bool  locked = Busy();
     const float L = side.left + 16, R = side.right - 16;
     g_listRect = Rect(0, 0, 0, 0);
 
@@ -1925,7 +2453,130 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
     y += 24;
 
     if (locked)
-        Text(L"لا يمكن تغيير الإعدادات أثناء التسجيل", g_fSmall.Get(), Rect(L, y, R, y + 18), Theme::Yellow);
+        Text(L"لا يمكن تغيير الإعدادات أثناء التسجيل أو البث", g_fSmall.Get(), Rect(L, y, R, y + 18), Theme::Yellow);
+}
+
+
+// ---------- تبويب البث: الوجهات + إعدادات البث ----------
+void DrawStreamTab(const D2D1_RECT_F& side, float y)
+{
+    const bool live = g_streamer.IsActive();
+    const float L = side.left + 16, R = side.right - 16;
+
+    Text(L"وجهات البث", g_fSection.Get(), Rect(side.left + 140, y, side.right - 18, y + 30), Theme::SubText);
+    const D2D1_RECT_F add = Rect(side.left + 12, y, side.left + 132, y + 30);
+    Fill(add, live ? Theme::Off : (AddHit(add, ID_ADD_TARGET) ? D2D1::ColorF(0x6A9DFF) : Theme::Accent), 8);
+    Text(L"+  إضافة وجهة", g_fSegment.Get(), add, Theme::White);
+
+    const float settingsH = 196;
+    g_listRect = Rect(side.left + 8, y + 38, side.right - 8, side.bottom - settingsH);
+
+    const float rowH = 62, gap = 6;
+    const float contentH = g_targets.size() * (rowH + gap);
+    const float listH    = g_listRect.bottom - g_listRect.top;
+    g_scroll = std::clamp(g_scroll, 0.0f, std::max(0.0f, contentH - listH));
+
+    if (g_targets.empty())
+    {
+        Text(L"لا توجد وجهات بعد", g_fCenter.Get(), Rect(g_listRect.left, g_listRect.top + 20, g_listRect.right, g_listRect.top + 50), Theme::SubText);
+        Text(L"أضف يوتيوب أو تيك توك أو غيرها، ويمكنك البث إليها كلها معاً", g_fSmall.Get(),
+             Rect(g_listRect.left + 8, g_listRect.top + 52, g_listRect.right - 8, g_listRect.top + 72), Theme::SubText);
+    }
+
+    g_rt->PushAxisAlignedClip(g_listRect, D2D1_ANTIALIAS_MODE_ALIASED);
+    for (int i = 0; i < (int)g_targets.size(); ++i)
+    {
+        const StreamTarget& t = g_targets[i];
+        const float top = g_listRect.top + i * (rowH + gap) - g_scroll;
+        if (top + rowH < g_listRect.top || top > g_listRect.bottom)
+            continue;
+        const D2D1_RECT_F row = Rect(g_listRect.left, top, g_listRect.right, top + rowH);
+        Fill(row, Theme::Card, 10);
+
+        // شعار المنصة (مربع ملوّن)
+        const D2D1_RECT_F badge = Rect(row.right - 50, row.top + 12, row.right - 12, row.top + 50);
+        DrawPlatformIcon((int)t.platform, badge, t.enabled);
+
+        Text(t.name, g_fBody.Get(), Rect(row.left + 96, row.top + 9, row.right - 60, row.top + 31),
+             t.enabled ? Theme::Text : Theme::SubText);
+
+        // السطر التاني: الحالة
+        std::wstring sub;
+        D2D1_COLOR_F subColor = Theme::SubText, dot = Theme::Off;
+        const OutputStatus* st = TargetStatus(i);
+        if (st)
+        {
+            switch (st->state)
+            {
+            case OutputState::Live:
+            {
+                wchar_t buf[96];
+                swprintf_s(buf, L"مباشر • %d كيلوبت/ث", (int)std::lround(st->kbps));
+                sub = buf;
+                if (st->dropped > 0)
+                    sub += L" • فُقد " + std::to_wstring(st->dropped) + L" إطار";
+                subColor = Theme::Green; dot = Theme::Green;
+                break;
+            }
+            case OutputState::Connecting:   sub = L"جارٍ الاتصال…"; subColor = dot = Theme::Yellow; break;
+            case OutputState::Reconnecting: sub = L"إعادة الاتصال… " + st->message; subColor = dot = Theme::Yellow; break;
+            case OutputState::Failed:       sub = st->message; subColor = dot = Theme::Red; break;
+            default:                        sub = L"متوقف"; break;
+            }
+        }
+        else if (!t.enabled)          sub = L"معطّلة";
+        else if (t.url.empty())      { sub = L"أدخل عنوان الخادم من القائمة"; subColor = Theme::Yellow; }
+        else if (t.key.empty())      { sub = L"أدخل مفتاح البث من القائمة"; subColor = Theme::Yellow; }
+        else                          sub = L"جاهزة";
+        if (st)
+            Circle(row.right - 64, row.top + 42, 4, dot);
+        Text(sub, g_fSmall.Get(), Rect(row.left + 96, row.top + 32, row.right - (st ? 74.0f : 60.0f), row.top + 52), subColor);
+
+        // مفتاح التفعيل + زر القائمة
+        const D2D1_RECT_F toggle = Rect(row.left + 10, row.top + 18, row.left + 54, row.top + 44);
+        AddHit(toggle, ID_TARGET_TOGGLE_FIRST + i);
+        DrawToggle(row.left + 12, row.top + 19, t.enabled, !live);
+
+        const D2D1_RECT_F more = Rect(row.left + 58, row.top + 15, row.left + 90, row.top + 47);
+        if (AddHit(more, ID_TARGET_MENU_FIRST + i) && !live)
+            Fill(more, Theme::Hover, 8);
+        Text(Icon::More, g_fIcon.Get(), more, live ? Theme::Off : Theme::SubText);
+    }
+    g_rt->PopAxisAlignedClip();
+
+    // ---- إعدادات البث ----
+    float sy = side.bottom - settingsH;
+    Fill(Rect(side.left + 16, sy + 4, side.right - 16, sy + 5), Theme::Border);
+    Text(L"دقة البث", g_fSection.Get(), Rect(L, sy + 12, R, sy + 34), Theme::SubText);
+    DrawSegmented(Rect(L, sy + 36, R, sy + 70), { L"اللوحة", L"1080p", L"720p" }, g_streamRes, ID_STREAM_RES_FIRST, !live);
+    UINT32 sw, sh;
+    StreamSize(sw, sh);
+    Text(SizeText((int)sw, (int)sh) + L"  •  " + std::to_wstring(std::min<UINT32>(CurrentFps(), 60)) + L" إطار/ث",
+         g_fSmall.Get(), Rect(L, sy + 72, R, sy + 90), Theme::SubText);
+
+    sy += 96;
+    Text(L"معدّل البت", g_fSection.Get(), Rect(L, sy, R, sy + 22), Theme::SubText);
+    sy += 24;
+    const D2D1_RECT_F box   = Rect(L, sy, R, sy + 34);
+    const D2D1_RECT_F plus  = Rect(R - 40, sy + 3, R - 3, sy + 31);
+    const D2D1_RECT_F minus = Rect(L + 3, sy + 3, L + 40, sy + 31);
+    Fill(box, Theme::Card, 9);
+    if (AddHit(plus, ID_STREAM_KBPS_PLUS) && !live)   Fill(plus, Theme::Hover, 7);
+    if (AddHit(minus, ID_STREAM_KBPS_MINUS) && !live) Fill(minus, Theme::Hover, 7);
+    Text(L"+", g_fCenter.Get(), plus,  live ? Theme::Off : Theme::Text);
+    Text(L"−", g_fCenter.Get(), minus, live ? Theme::Off : Theme::Text);
+    Text(std::to_wstring(g_streamKbps) + L" كيلوبت/ث", g_fCenter.Get(), Rect(L + 44, sy, R - 44, sy + 34), Theme::Text);
+    sy += 38;
+
+    // تنبيه: كل منصة بتاخد نفس السرعة من النت
+    int enabled = 0;
+    for (const StreamTarget& t : g_targets) if (t.enabled) ++enabled;
+    std::wstring hint;
+    if (enabled > 1)
+        hint = L"سرعة الرفع المطلوبة ≈ " + std::to_wstring((g_streamKbps + 160) * enabled / 1000 + 1) + L" ميغابت/ث (" + std::to_wstring(enabled) + L" منصات)";
+    else
+        hint = L"يوتيوب ينصح بـ 4500–9000 لـ 1080p";
+    Text(hint, g_fSmall.Get(), Rect(L, sy, R, sy + 18), Theme::SubText);
 }
 
 // ---------- الشريط الجانبي ----------
@@ -1933,9 +2584,10 @@ void DrawSidebar(const D2D1_RECT_F& side)
 {
     Fill(side, Theme::Panel, 14);
     DrawSegmented(Rect(side.left + 12, side.top + 12, side.right - 12, side.top + 46),
-                  { L"المصادر", L"الإعدادات" }, g_tab, ID_TAB_SOURCES, true);
-    if (g_tab == 0) DrawSourcesTab(side, side.top + 58);
-    else            DrawSettingsTab(side, side.top + 58);
+                  { L"المصادر", L"البث", L"الإعدادات" }, g_tab, ID_TAB_SOURCES, true);
+    if (g_tab == 0)      DrawSourcesTab(side, side.top + 58);
+    else if (g_tab == 1) DrawStreamTab(side, side.top + 58);
+    else                 DrawSettingsTab(side, side.top + 58);
 }
 
 // ---------- الشريط السفلي ----------
@@ -1961,6 +2613,17 @@ void DrawBottomBar(const D2D1_RECT_F& bar)
     Text(paused ? Icon::Play : Icon::Pause, g_fIcon.Get(), pauseRect,
          rec ? (paused ? Theme::Yellow : Theme::Text) : Theme::Off);
 
+    // زر البث المباشر
+    const bool streaming = g_streamer.IsActive();
+    const D2D1_RECT_F live = Rect(cx - 246, cy - 20, cx - 98, cy + 20);
+    const bool liveHover = AddHit(live, ID_STREAM);
+    if (streaming) Fill(live, liveHover ? D2D1::ColorF(0xFF5C78) : D2D1::ColorF(0xFF3B5C), 20);
+    else           Fill(live, liveHover ? Theme::Hover : Theme::Card, 20);
+    Text(Icon::Live, g_fIcon.Get(), Rect(live.right - 40, live.top, live.right - 12, live.bottom),
+         streaming ? Theme::White : D2D1::ColorF(0xFF3B5C));
+    Text(streaming ? L"إيقاف البث" : L"بدء البث", g_fCenter.Get(), Rect(live.left + 8, live.top, live.right - 40, live.bottom),
+         streaming ? Theme::White : Theme::Text);
+
     // زر فتح المجلد
     const D2D1_RECT_F folder = Rect(bar.left + 16, cy - 20, bar.left + 186, cy + 20);
     Fill(folder, AddHit(folder, ID_FOLDER) ? Theme::Hover : Theme::Card, 10);
@@ -1971,10 +2634,13 @@ void DrawBottomBar(const D2D1_RECT_F& bar)
     const D2D1_RECT_F info = Rect(cx + R + 24, bar.top, bar.right - 20, bar.bottom);
     if (!g_message.empty())
         Text(g_message, g_fBody.Get(), Rect(info.left, cy - 22, info.right, cy), g_messageIsError ? Theme::Red : Theme::Green);
+    else if (streaming)
+        Text(L"البث: " + std::to_wstring(LiveCount()) + L" من " + std::to_wstring(g_liveTargets.size()) + L" منصات على الهواء",
+             g_fBody.Get(), Rect(info.left, cy - 22, info.right, cy), Theme::Text);
     else
         Text(rec ? L"المشفّر: " + g_recorder.EncoderName() : std::wstring(L"رتّب المشهد ثم اضغط الزر الأحمر"),
              g_fBody.Get(), Rect(info.left, cy - 22, info.right, cy), Theme::Text);
-    Text(L"F9 تسجيل / إيقاف    •    F10 إيقاف مؤقت", g_fSmall.Get(),
+    Text(L"F9 تسجيل  •  F10 إيقاف مؤقت  •  F8 بث", g_fSmall.Get(),
          Rect(info.left, cy + 2, info.right, cy + 22), Theme::SubText);
 }
 
@@ -2000,6 +2666,8 @@ void CreateRenderTarget()
 
 void DiscardRenderTarget()
 {
+    g_logoRt.Reset();
+    for (auto& b : g_logoBmp) b.Reset();
     g_previewBitmap.Reset();
     g_previewValid = false;
     g_brush.Reset();
@@ -2224,9 +2892,11 @@ void NudgeSelected(double dx, double dy)
 // =============================================================
 void OnClick(int id, D2D1_POINT_2F p)
 {
-    const bool rec = g_recorder.IsRecording();
+    const bool rec = Busy();
     const POINT screen = DipToScreen(p.x, p.y);
 
+    if (id >= ID_TARGET_MENU_FIRST)   { ShowTargetMenu(id - ID_TARGET_MENU_FIRST, screen); return; }
+    if (id >= ID_TARGET_TOGGLE_FIRST) { ToggleTarget(id - ID_TARGET_TOGGLE_FIRST); return; }
     if (id >= ID_SCENE_FIRST)  { SwitchScene(id - ID_SCENE_FIRST); return; }
     if (id >= ID_DELETE_FIRST) { RemoveLayer(id - ID_DELETE_FIRST); return; }
     if (id >= ID_EYE_FIRST)    { LayerCommand(id - ID_EYE_FIRST, 8); return; }
@@ -2247,6 +2917,11 @@ void OnClick(int id, D2D1_POINT_2F p)
         if (!rec) { g_crashSafe = (id == ID_CONTAINER_FIRST); SaveSettings(); }
         return;
     }
+    if (id >= ID_STREAM_RES_FIRST && id < ID_STREAM_RES_FIRST + 3)
+    {
+        if (!g_streamer.IsActive()) { g_streamRes = id - ID_STREAM_RES_FIRST; SaveSettings(); }
+        return;
+    }
     if (id >= ID_QUALITY_FIRST && id < ID_QUALITY_FIRST + 4)
     {
         if (!rec) { g_quality = id - ID_QUALITY_FIRST; SaveSettings(); }
@@ -2255,8 +2930,19 @@ void OnClick(int id, D2D1_POINT_2F p)
     switch (id)
     {
     case ID_ADD_SCENE:     AddScene(); SaveScenes(); break;
-    case ID_TAB_SOURCES:   g_tab = 0; break;
-    case ID_TAB_SETTINGS:  g_tab = 1; break;
+    case ID_SYSTEM_MUTE:   g_systemAudio.SetMuted(!g_systemAudio.IsMuted()); SaveSettings(); break;
+    case ID_MIC_MUTE:      g_micAudio.SetMuted(!g_micAudio.IsMuted()); SaveSettings(); break;
+    case ID_TAB_SOURCES:   g_tab = 0; g_scroll = 0; break;
+    case ID_TAB_STREAM:    g_tab = 1; g_scroll = 0; break;
+    case ID_TAB_SETTINGS:  g_tab = 2; break;
+    case ID_STREAM:        ToggleStreaming(); break;
+    case ID_ADD_TARGET:    AddTarget(screen); break;
+    case ID_STREAM_KBPS_MINUS:
+        if (!g_streamer.IsActive()) { g_streamKbps = std::max<UINT32>(1000, g_streamKbps - 500); SaveSettings(); }
+        break;
+    case ID_STREAM_KBPS_PLUS:
+        if (!g_streamer.IsActive()) { g_streamKbps = std::min<UINT32>(20000, g_streamKbps + 500); SaveSettings(); }
+        break;
     case ID_BITRATE_MINUS: if (!rec) { ChangeBitrate(-1); SaveSettings(); } break;
     case ID_BITRATE_PLUS:  if (!rec) { ChangeBitrate(+1); SaveSettings(); } break;
     case ID_ENCODER_MENU:  if (!rec) ShowEncoderMenu(screen); break;
@@ -2309,6 +2995,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SetTimer(hwnd, TIMER_FRAME, 33, nullptr);
         RegisterHotKey(hwnd, HOTKEY_RECORD, MOD_NOREPEAT, VK_F9);
         RegisterHotKey(hwnd, HOTKEY_PAUSE,  MOD_NOREPEAT, VK_F10);
+        RegisterHotKey(hwnd, HOTKEY_STREAM, MOD_NOREPEAT, VK_F8);
+        LoadTargets();
         return 0;
     }
 
@@ -2317,8 +3005,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_systemLevel = std::max(LevelToMeter(g_systemAudio.TakePeak()), g_systemLevel * 0.88f);
         g_micLevel    = std::max(LevelToMeter(g_micAudio.TakePeak()),    g_micLevel * 0.88f);
         // المعاينة: 10 مرات بالثانية (ووقت التسجيل 5 لنوفّر المعالج)
-        if (g_tick % (g_recorder.IsRecording() ? 6 : 3) == 0)
+        if (g_tick % (Busy() ? 6 : 3) == 0)
             UpdatePreview();
+        if (g_streamer.IsActive())
+            g_streamStatus = g_streamer.Status();
         if (g_tick % 60 == 0)           // كل ثانيتين: النوافذ اللي رجعت انفتحت
             ReconnectLostWindows();
         if (g_tick % 150 == 0 && g_drag == Drag::None)   // كل 5 ثواني منحفظ المشاهد
@@ -2364,6 +3054,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_MOUSEMOVE:
     {
         g_mouse = ToDip(lParam);
+        if (g_volDrag)
+            SetVolumeFromX(*g_volDrag, g_volTrack[g_volDrag == &g_systemAudio ? 0 : 1], g_mouse.x);
         if (g_drag != Drag::None)
             UpdateDrag(g_mouse, (wParam & MK_SHIFT) != 0, (GetKeyState(VK_CONTROL) & 0x8000) != 0);
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
@@ -2379,7 +3071,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONDOWN:
     {
         const D2D1_POINT_2F p = ToDip(lParam);
-        if (HitAt(p) == 0)          // مش فوق زر: يمكن فوق المعاينة
+        const int hit = HitAt(p);
+        if (hit == ID_SYSTEM_VOL || hit == ID_MIC_VOL)     // بلّش سحب شريط العلو
+        {
+            const int index = (hit == ID_SYSTEM_VOL) ? 0 : 1;
+            g_volDrag = index == 0 ? &g_systemAudio : &g_micAudio;
+            SetVolumeFromX(*g_volDrag, g_volTrack[index], p.x);
+            SetCapture(hwnd);
+            return 0;
+        }
+        if (hit == 0)          // مش فوق زر: يمكن فوق المعاينة
             BeginDrag(p);
         SetFocus(hwnd);
         return 0;
@@ -2395,6 +3096,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             RenameScene(hit - ID_SCENE_FIRST);
             return 0;
         }
+        if (hit == ID_SYSTEM_VOL || hit == ID_MIC_VOL)     // دبل كليك على الشريط = رجوع لـ 100%
+        {
+            (hit == ID_SYSTEM_VOL ? g_systemAudio : g_micAudio).SetVolume(1.0f);
+            g_ignoreNextUp = true;
+            SaveSettings();
+            return 0;
+        }
         if (hit == 0)
             BeginDrag(p);
         return 0;
@@ -2405,6 +3113,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (g_ignoreNextUp)
         {
             g_ignoreNextUp = false;
+            return 0;
+        }
+        if (g_volDrag)
+        {
+            g_volDrag = nullptr;
+            ReleaseCapture();
+            SaveSettings();
             return 0;
         }
         if (g_drag != Drag::None)
@@ -2464,9 +3179,24 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(hwnd, &pt);
         const float s = 96.0f / g_dpi;
-        if (Inside(g_listRect, D2D1::Point2F(pt.x * s, pt.y * s)))
-            g_scroll -= GET_WHEEL_DELTA_WPARAM(wParam) / 120.0f * 54.0f;
+        const D2D1_POINT_2F mp = D2D1::Point2F(pt.x * s, pt.y * s);
+        const float steps = GET_WHEEL_DELTA_WPARAM(wParam) / 120.0f;
+        // عجلة الماوس فوق شريط العلو: ±5%
+        for (int i = 0; i < 2; ++i)
+        {
+            const D2D1_RECT_F t = g_volTrack[i];
+            if (Inside(Rect(t.left - 8, t.top - 12, t.right + 8, t.bottom + 12), mp))
+            {
+                AudioSource& src = i == 0 ? g_systemAudio : g_micAudio;
+                src.SetVolume(std::round((src.Volume() + steps * 0.05f) * 20.0f) / 20.0f);
+                SaveSettings();
+                return 0;
+            }
+        }
+        if (Inside(g_listRect, mp))
+            g_scroll -= steps * 54.0f;
         return 0;
+
     }
 
     case WM_SETCURSOR:   // شكل الماوس حسب المكان
@@ -2494,6 +3224,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_HOTKEY:
         if (wParam == HOTKEY_RECORD) ToggleRecording();
         if (wParam == HOTKEY_PAUSE)  TogglePause();
+        if (wParam == HOTKEY_STREAM) ToggleStreaming();
+        return 0;
+
+    case WM_STREAMER_DONE:   // البث وقف لحالو (مشكلة بمشفّر الفيديو)
+        StopStreaming(L"");
+        ShowMessage(L"توقّف البث: حدث خطأ في مشفّر الفيديو", true);
         return 0;
 
     case WM_RECORDER_DONE:   // المسجّل وقف لحالو (صار خطأ)
@@ -2509,6 +3245,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SaveScenes();
         UnregisterHotKey(hwnd, HOTKEY_RECORD);
         UnregisterHotKey(hwnd, HOTKEY_PAUSE);
+        UnregisterHotKey(hwnd, HOTKEY_STREAM);
+        g_streamer.Stop();
         g_recorder.Stop();           // إذا سكّرت وهو عم يسجّل، منحفظ الملف أول
         g_systemAudio.Stop();
         g_micAudio.Stop();
@@ -2600,7 +3338,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
         for (HICON icon : state)
             if (icon) DestroyIcon(icon);
     DiscardRenderTarget();
-    g_fTitle.Reset(); g_fSection.Reset(); g_fBody.Reset(); g_fSmall.Reset(); g_fSmallEnd.Reset();
+    g_fTitle.Reset(); g_fSection.Reset(); g_fBody.Reset(); g_fSmall.Reset(); g_fSmallEnd.Reset(); g_fSmallLtr.Reset();
     g_fCenter.Reset(); g_fSegment.Reset(); g_fTimer.Reset(); g_fIcon.Reset(); g_fIconBig.Reset();
     g_dwrite.Reset();
     g_d2d.Reset();

@@ -1,4 +1,4 @@
-﻿// =============================================================
+// =============================================================
 //  Recorder.cpp - هون بيصير التسجيل الحقيقي
 // =============================================================
 #include "Recorder.h"
@@ -226,8 +226,13 @@ HRESULT Recorder::Start(const RecordOptions& options)
     m_paused      = false;
     m_error       = S_OK;
 
+    m_taps.clear();
     for (AudioSource* src : m_opt.audio)
-        src->SetArmed(true, true);       // بلّش خزّن صوت للتسجيل
+    {
+        const int tap = src->AddTap();   // مخزن صوت خاص بالتسجيل
+        src->SetArmed(tap, true, true);  // بلّش خزّن
+        m_taps.push_back(tap);
+    }
 
     m_active  = true;
     m_running = true;
@@ -246,8 +251,9 @@ HRESULT Recorder::Stop()
     if (m_videoThread.joinable()) m_videoThread.join();
     if (m_audioThread.joinable()) m_audioThread.join();
 
-    for (AudioSource* src : m_opt.audio)
-        src->SetArmed(false, true);
+    for (size_t i = 0; i < m_opt.audio.size(); ++i)
+        m_opt.audio[i]->RemoveTap(m_taps[i]);
+    m_taps.clear();
 
     // منسكّر الملف صح (بدون هالخطوة الفيديو بيخرب)
     HRESULT hr = m_error;
@@ -280,8 +286,8 @@ void Recorder::SetPaused(bool paused)
         m_paused = paused;
     }
     // وقت الإيقاف المؤقت ما منخزّن صوت
-    for (AudioSource* src : m_opt.audio)
-        src->SetArmed(!paused, false);
+    for (size_t i = 0; i < m_opt.audio.size(); ++i)
+        m_opt.audio[i]->SetArmed(m_taps[i], !paused, false);
 }
 
 LONGLONG Recorder::Elapsed100ns()
@@ -458,14 +464,15 @@ void Recorder::AudioThread()
         tmp.resize(frames * AudioSource::CHANNELS);
 
         // الخلط = جمع الأصوات فوق بعض
-        for (AudioSource* src : m_opt.audio)
+        for (size_t s = 0; s < m_opt.audio.size(); ++s)
         {
-            const size_t got = src->Read(tmp.data(), frames);
+            AudioSource* src = m_opt.audio[s];
+            const size_t got = src->Read(m_taps[s], tmp.data(), frames);
             for (size_t i = 0; i < got * AudioSource::CHANNELS; ++i)
                 mix[i] += tmp[i];
 
             // إذا تجمّع صوت أكتر من اللازم (الساعات مش متطابقة 100%) منرمي القديم
-            src->KeepNewest(AUDIO_LAG_FRAMES * 3);
+            src->KeepNewest(m_taps[s], AUDIO_LAG_FRAMES * 3);
         }
 
         const LONGLONG time = written * ONE_SECOND / AudioSource::SAMPLE_RATE;

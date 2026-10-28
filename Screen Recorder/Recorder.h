@@ -1,4 +1,4 @@
-﻿// =============================================================
+// =============================================================
 //  Recorder.h - "المسجّل": بيجمع الصورة والصوت وبيكتبهم بملف MP4
 //
 //  في خيطين بيشتغلوا سوا:
@@ -77,6 +77,7 @@ private:
     HRESULT  WriteAudio(const float* mix, size_t frames, LONGLONG time);
 
     RecordOptions m_opt;
+    std::vector<int> m_taps;              // مخازن الصوت تبعنا (وحدة لكل مصدر)
     int           m_width = 0, m_height = 0;
     UINT32        m_fps = 30;
     LONGLONG      m_frameDuration = 10'000'000 / 30;

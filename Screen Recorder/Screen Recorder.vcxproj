@@ -154,6 +154,10 @@
     <ClCompile Include="Audio.cpp" />
     <ClCompile Include="Scene.cpp" />
     <ClCompile Include="Gpu.cpp" />
+    <ClCompile Include="Net.cpp" />
+    <ClCompile Include="Encoders.cpp" />
+    <ClCompile Include="Rtmp.cpp" />
+    <ClCompile Include="Streamer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Recorder.h" />
@@ -161,6 +165,16 @@
     <ClInclude Include="Audio.h" />
     <ClInclude Include="Scene.h" />
     <ClInclude Include="Gpu.h" />
+    <ClInclude Include="Net.h" />
+    <ClInclude Include="Encoders.h" />
+    <ClInclude Include="Rtmp.h" />
+    <ClInclude Include="Streamer.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="app.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="app.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
