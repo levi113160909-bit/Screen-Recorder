@@ -1,0 +1,21 @@
+# ملفات Visual Studio المؤقتة
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.aps
+ipch/
+
+# نتائج البناء (Build)
+x64/
+x86/
+Win32/
+Debug/
+Release/
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.log
+*.tlog

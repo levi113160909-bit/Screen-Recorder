@@ -1,0 +1,374 @@
+﻿// =============================================================
+//  Gpu.cpp - التصوير والتركيب على كرت الشاشة
+// =============================================================
+#include "Gpu.h"
+
+#include <unknwn.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <d2d1_1.h>
+#include <wrl/client.h>
+
+// C++/WinRT: مكتبة ويندوز الحديثة (فيها Windows Graphics Capture)
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
+
+#include <algorithm>
+#include <atomic>
+#include <map>
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "windowsapp.lib")
+
+using Microsoft::WRL::ComPtr;
+namespace wgc = winrt::Windows::Graphics::Capture;
+namespace wgd = winrt::Windows::Graphics::DirectX;
+namespace wd3 = winrt::Windows::Graphics::DirectX::Direct3D11;
+
+namespace
+{
+    // من صورة WinRT لـ texture عادي تبع Direct3D
+    ComPtr<ID3D11Texture2D> TextureOf(const wd3::IDirect3DSurface& surface)
+    {
+        auto access = surface.as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+        ComPtr<ID3D11Texture2D> tex;
+        winrt::check_hresult(access->GetInterface(IID_PPV_ARGS(&tex)));
+        return tex;
+    }
+
+    // مصدر واحد (شاشة أو نافذة) مع جلسة التصوير تبعه
+    struct Source
+    {
+        CaptureTarget                   target;
+        wgc::GraphicsCaptureItem        item{ nullptr };
+        wgc::Direct3D11CaptureFramePool pool{ nullptr };
+        wgc::GraphicsCaptureSession     session{ nullptr };
+        winrt::Windows::Graphics::SizeInt32 poolSize{};
+        winrt::event_token              closedToken{};
+        std::shared_ptr<std::atomic<bool>> closed = std::make_shared<std::atomic<bool>>(false);
+
+        // آخر صورة وصلتنا (ويندوز ما بيبعت صورة جديدة إلا إذا تغيّر شي)
+        ComPtr<ID3D11Texture2D> cache;
+        ComPtr<ID2D1Bitmap1>    bitmap;
+        UINT                    cacheW = 0, cacheH = 0;
+        bool                    failed = false;
+
+        ~Source()
+        {
+            try
+            {
+                if (item)    item.Closed(closedToken);
+                if (session) session.Close();
+                if (pool)    pool.Close();
+            }
+            catch (...) {}
+        }
+    };
+}
+
+struct GpuCompositor::Impl
+{
+    bool captureCursor = true;
+
+    ComPtr<ID3D11Device>        device;
+    ComPtr<ID3D11DeviceContext> context;
+    wd3::IDirect3DDevice        winrtDevice{ nullptr };
+
+    ComPtr<ID2D1Factory1>       d2dFactory;
+    ComPtr<ID2D1Device>         d2dDevice;
+    ComPtr<ID2D1DeviceContext>  dc;
+
+    // اللوحة (على كرت الشاشة) + نسخة بنقدر نقراها من المعالج
+    ComPtr<ID3D11Texture2D>     canvas;
+    ComPtr<ID3D11Texture2D>     staging;
+    ComPtr<ID2D1Bitmap1>        canvasTarget;
+    int                         canvasW = 0, canvasH = 0;
+
+    std::map<int, std::unique_ptr<Source>> sources;    // لكل طبقة مصدر
+
+    bool Init()
+    {
+        const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1 };
+        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                       levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device, nullptr, &context);
+        if (FAILED(hr))
+            return false;
+
+        ComPtr<IDXGIDevice> dxgi;
+        if (FAILED(device.As(&dxgi)))
+            return false;
+
+        // نسخة WinRT من نفس الجهاز (بدها ياها Windows Graphics Capture)
+        winrt::com_ptr<::IInspectable> inspectable;
+        if (FAILED(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), inspectable.put())))
+            return false;
+        winrtDevice = inspectable.as<wd3::IDirect3DDevice>();
+
+        // Direct2D فوق نفس الجهاز
+        D2D1_FACTORY_OPTIONS opts{};
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), &opts, &d2dFactory)))
+            return false;
+        if (FAILED(d2dFactory->CreateDevice(dxgi.Get(), &d2dDevice)))
+            return false;
+        if (FAILED(d2dDevice->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc)))
+            return false;
+        dc->SetDpi(96, 96);                 // وحدة الرسم = بكسل
+        return true;
+    }
+
+    bool EnsureCanvas(int w, int h)
+    {
+        if (canvas && w == canvasW && h == canvasH)
+            return true;
+        canvas.Reset();
+        staging.Reset();
+        canvasTarget.Reset();
+        dc->SetTarget(nullptr);
+
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width            = w;
+        d.Height           = h;
+        d.MipLevels        = 1;
+        d.ArraySize        = 1;
+        d.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.Usage            = D3D11_USAGE_DEFAULT;
+        d.BindFlags        = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&d, nullptr, &canvas)))
+            return false;
+
+        d.Usage          = D3D11_USAGE_STAGING;
+        d.BindFlags      = 0;
+        d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(device->CreateTexture2D(&d, nullptr, &staging)))
+            return false;
+
+        ComPtr<IDXGISurface> surface;
+        canvas.As(&surface);
+        const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if (FAILED(dc->CreateBitmapFromDxgiSurface(surface.Get(), &props, &canvasTarget)))
+            return false;
+
+        canvasW = w;
+        canvasH = h;
+        return true;
+    }
+
+    // منفتح جلسة تصوير لمصدر جديد
+    std::unique_ptr<Source> OpenSource(const CaptureTarget& t)
+    {
+        auto src = std::make_unique<Source>();
+        src->target = t;
+        try
+        {
+            auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+            if (t.isMonitor)
+            {
+                HMONITOR monitor = MonitorFromRect(&t.rect, MONITOR_DEFAULTTONEAREST);
+                winrt::check_hresult(interop->CreateForMonitor(monitor, winrt::guid_of<wgc::GraphicsCaptureItem>(),
+                                                               winrt::put_abi(src->item)));
+            }
+            else
+            {
+                winrt::check_hresult(interop->CreateForWindow(t.hwnd, winrt::guid_of<wgc::GraphicsCaptureItem>(),
+                                                              winrt::put_abi(src->item)));
+            }
+
+            // إذا النافذة انسكّرت ويندوز بيخبّرنا
+            auto closed = src->closed;
+            src->closedToken = src->item.Closed([closed](auto&&, auto&&) { *closed = true; });
+
+            src->poolSize = src->item.Size();
+            src->pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
+                winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, src->poolSize);
+            src->session = src->pool.CreateCaptureSession(src->item);
+            src->session.IsCursorCaptureEnabled(captureCursor);
+            try { src->session.IsBorderRequired(false); } catch (...) {}   // بلا الإطار الأصفر (ويندوز 11)
+            src->session.StartCapture();
+        }
+        catch (...)
+        {
+            src->failed = true;
+        }
+        return src;
+    }
+
+    // منسحب آخر صورة وصلت من المصدر لـ cache
+    void Update(Source& s)
+    {
+        if (s.failed || !s.pool)
+            return;
+        wgc::Direct3D11CaptureFrame latest{ nullptr };
+        for (auto f = s.pool.TryGetNextFrame(); f; f = s.pool.TryGetNextFrame())
+        {
+            if (latest) latest.Close();
+            latest = f;                      // منحتفظ بالأحدث بس
+        }
+        if (!latest)
+            return;
+
+        const auto size = latest.ContentSize();
+        ComPtr<ID3D11Texture2D> tex = TextureOf(latest.Surface());
+        D3D11_TEXTURE2D_DESC td{};
+        tex->GetDesc(&td);
+
+        // إذا تغيّر حجم النافذة منجدّد "خزّان" الصور
+        if (size.Width != s.poolSize.Width || size.Height != s.poolSize.Height)
+        {
+            s.poolSize = size;
+            s.pool.Recreate(winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+        }
+
+        const UINT w = std::min<UINT>((UINT)std::max(1, size.Width), td.Width);
+        const UINT h = std::min<UINT>((UINT)std::max(1, size.Height), td.Height);
+        if (!s.cache || w != s.cacheW || h != s.cacheH)
+        {
+            s.cache.Reset();
+            s.bitmap.Reset();
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1;
+            d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            d.SampleDesc.Count = 1;
+            d.Usage = D3D11_USAGE_DEFAULT;
+            d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(device->CreateTexture2D(&d, nullptr, &s.cache)))
+            {
+                latest.Close();
+                return;
+            }
+            s.cacheW = w;
+            s.cacheH = h;
+        }
+        const D3D11_BOX box{ 0, 0, 0, w, h, 1 };
+        context->CopySubresourceRegion(s.cache.Get(), 0, 0, 0, 0, tex.Get(), 0, &box);
+        latest.Close();
+    }
+
+    bool Compose(const std::vector<SceneLayer>& layers, int cw, int ch,
+                 BYTE* out, int outW, int outH, int stride, bool bottomUp, std::vector<int>* lostIds)
+    {
+        if (!EnsureCanvas(outW, outH))
+            return false;
+
+        // منسكّر مصادر الطبقات اللي انحذفت
+        for (auto it = sources.begin(); it != sources.end();)
+        {
+            bool exists = false;
+            for (const SceneLayer& l : layers)
+                if (l.id == it->first) { exists = true; break; }
+            it = exists ? std::next(it) : sources.erase(it);
+        }
+
+        dc->SetTarget(canvasTarget.Get());
+        dc->BeginDraw();
+        dc->Clear(D2D1::ColorF(0, 0, 0, 1));
+
+        const float sx = (float)outW / cw, sy = (float)outH / ch;
+        for (const SceneLayer& l : layers)
+        {
+            auto& src = sources[l.id];
+            bool fresh = false;
+            if (!src || !SameTarget(src->target, l.target))    // جديد، أو النافذة رجعت انفتحت
+            {
+                src = OpenSource(l.target);
+                fresh = true;
+            }
+
+            const bool lost = *src->closed || (!l.target.isMonitor && !IsWindow(l.target.hwnd));
+            if (lost)
+            {
+                if (lostIds) lostIds->push_back(l.id);
+                continue;
+            }
+            Update(*src);
+            // مصدر جديد: منستنى شوي لأول صورة (بدل ما يطلع أسود لحظة)
+            for (int i = 0; fresh && !src->cache && !src->failed && i < 15; ++i)
+            {
+                Sleep(10);
+                Update(*src);
+            }
+            if (!l.visible || !src->cache)
+                continue;
+
+            if (!src->bitmap)
+            {
+                ComPtr<IDXGISurface> surface;
+                src->cache.As(&surface);
+                const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
+                if (FAILED(dc->CreateBitmapFromDxgiSurface(surface.Get(), &props, &src->bitmap)))
+                    continue;
+            }
+
+            const D2D1_RECT_F dst = D2D1::RectF((float)l.x * sx, (float)l.y * sy,
+                                                (float)(l.x + l.w) * sx, (float)(l.y + l.h) * sy);
+            // تصغير كبير = فلتر أنعم (أبطأ شوي) ، غير هيك فلتر سريع
+            const float scale = (dst.right - dst.left) / src->cacheW;
+            dc->DrawBitmap(src->bitmap.Get(), &dst, 1.0f,
+                           scale < 0.75f ? D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC : D2D1_INTERPOLATION_MODE_LINEAR,
+                           nullptr, nullptr);
+        }
+
+        if (FAILED(dc->EndDraw()))
+            return false;
+        dc->SetTarget(nullptr);
+
+        // منسحب الصورة الجاهزة للذاكرة
+        context->CopyResource(staging.Get(), canvas.Get());
+        D3D11_MAPPED_SUBRESOURCE map{};
+        if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map)))
+            return false;
+        for (int y = 0; y < outH; ++y)
+        {
+            const BYTE* srcRow = (const BYTE*)map.pData + (size_t)y * map.RowPitch;
+            BYTE*       dstRow = out + (size_t)(bottomUp ? (outH - 1 - y) : y) * stride;
+            memcpy(dstRow, srcRow, (size_t)outW * 4);
+        }
+        context->Unmap(staging.Get(), 0);
+        return true;
+    }
+};
+
+// =============================================================
+std::unique_ptr<GpuCompositor> GpuCompositor::Create(bool captureCursor)
+{
+    try
+    {
+        if (!wgc::GraphicsCaptureSession::IsSupported())
+            return nullptr;
+        std::unique_ptr<GpuCompositor> c(new GpuCompositor());
+        c->m = std::make_unique<Impl>();
+        c->m->captureCursor = captureCursor;
+        if (!c->m->Init())
+            return nullptr;
+        return c;
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+GpuCompositor::~GpuCompositor() = default;
+
+bool GpuCompositor::Compose(const std::vector<SceneLayer>& layers, int canvasW, int canvasH,
+                            BYTE* out, int outW, int outH, int stride, bool bottomUp, std::vector<int>* lostIds)
+{
+    try
+    {
+        return m->Compose(layers, canvasW, canvasH, out, outW, outH, stride, bottomUp, lostIds);
+    }
+    catch (...)
+    {
+        return false;
+    }
+}

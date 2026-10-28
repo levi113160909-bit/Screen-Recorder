@@ -1,0 +1,86 @@
+﻿// =============================================================
+//  Audio.h - مصدر صوت: صوت الكمبيوتر أو المايك
+//
+//  كل مصدر بيشتغل بخيط لحالو وبياخد الصوت من ويندوز (WASAPI)
+//  وبيحوّله لشكل موحّد: 48000 عينة بالثانية، ستيريو (قناتين)
+// =============================================================
+#pragma once
+#ifndef NOMINMAX
+#define NOMINMAX      // بيمنع ويندوز يخرّب std::min و std::max
+#endif
+
+#include <windows.h>
+#include <atomic>
+#include <deque>
+#include <future>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+// جهاز صوت (سماعة أو ميكروفون)
+struct AudioDevice
+{
+    std::wstring id;     // رقمه عند ويندوز
+    std::wstring name;   // اسمه
+};
+
+class AudioSource
+{
+public:
+    enum class Kind { System, Microphone };
+
+    static constexpr UINT32 SAMPLE_RATE = 48000;
+    static constexpr UINT32 CHANNELS    = 2;
+
+    explicit AudioSource(Kind kind) : m_kind(kind) {}
+    ~AudioSource() { Stop(); }
+
+    bool Start();                 // بلّش ياخد صوت (بيرجّع false إذا ما في جهاز)
+    void Stop();
+    bool IsRunning() const { return m_running; }
+
+    // أعلى مستوى صوت من آخر مرة سألنا (0 = سكوت ، 1 = أعلى شي)
+    float TakePeak() { return m_peak.exchange(0.0f); }
+
+    std::wstring DeviceName();
+
+    // اختيار الجهاز: id فاضي = الجهاز الافتراضي بويندوز
+    void         SetDeviceId(const std::wstring& id) { m_deviceId = id; }
+    std::wstring DeviceId() const { return m_deviceId; }
+
+    // كل الأجهزة الشغّالة من هالنوع
+    static std::vector<AudioDevice> ListDevices(Kind kind);
+
+    // "مسلّح" = عم يخزّن الصوت للتسجيل. clear = امسح المخزّن القديم
+    void SetArmed(bool armed, bool clear);
+
+    // للمسجّل: خود عدد frames من الصوت المخزّن (كل frame = يسار + يمين)
+    size_t Read(float* dst, size_t frames);
+    size_t Available();
+    void   KeepNewest(size_t frames);    // ارمي القديم إذا تجمّع كتير
+
+private:
+    void ThreadMain(std::promise<bool>* ready);   // ready: منقول فيه إذا الجهاز اشتغل
+    void Process(const BYTE* data, UINT32 frames, bool silent);
+    float SampleAt(const BYTE* data, UINT32 frame, UINT32 channel) const;
+
+    Kind               m_kind;
+    std::atomic<bool>  m_running{ false };
+    std::atomic<bool>  m_armed{ false };
+    std::atomic<float> m_peak{ 0.0f };
+    std::thread        m_thread;
+
+    std::mutex         m_mutex;          // بيحمي m_fifo و m_name
+    std::deque<float>  m_fifo;           // الصوت المخزّن للتسجيل
+    std::wstring       m_name;
+    std::wstring       m_deviceId;       // فاضي = الافتراضي
+
+    // شكل الصوت اللي جاي من الجهاز
+    UINT32 m_srcChannels = 2, m_srcRate = 48000, m_srcBits = 32, m_srcBlock = 8;
+    bool   m_srcFloat = true;
+
+    // لتحويل سرعة العينات (مثلاً 44100 -> 48000)
+    double m_step = 1.0, m_phase = 0.0;
+    float  m_prevL = 0.0f, m_prevR = 0.0f;
+};
