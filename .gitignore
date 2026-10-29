@@ -19,3 +19,6 @@ Release/
 *.obj
 *.log
 *.tlog
+
+# نسخ الإصدار الجاهزة (بتنرفع على GitHub Releases، مش مع الكود)
+dist/
