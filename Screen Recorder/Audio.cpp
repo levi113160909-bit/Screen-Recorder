@@ -6,6 +6,8 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <mmreg.h>
+#include <audioclientactivationparams.h>
+#include <wrl/implements.h>
 #include <propsys.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -14,6 +16,7 @@
 #include <vector>
 
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "mmdevapi.lib")
 
 using Microsoft::WRL::ComPtr;
 
@@ -24,6 +27,62 @@ namespace
         { { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14 };
 
     constexpr size_t MAX_FIFO_FRAMES = AudioSource::SAMPLE_RATE * 2;   // أقصى شي ثانيتين
+
+    // ---------------------------------------------------------
+    // صوت برنامج واحد: ويندوز بيفتحه "بشكل غير متزامن"،
+    // فمنعطيه هالكائن، وهو بيخبرنا لما يخلص
+    // ---------------------------------------------------------
+    using namespace Microsoft::WRL;
+    class ActivateHandler : public RuntimeClass<RuntimeClassFlags<ClassicCom>, FtmBase,
+                                                IActivateAudioInterfaceCompletionHandler>
+    {
+    public:
+        ActivateHandler()  { done = CreateEventW(nullptr, TRUE, FALSE, nullptr); }
+        ~ActivateHandler() { if (done) CloseHandle(done); }
+
+        STDMETHOD(ActivateCompleted)(IActivateAudioInterfaceAsyncOperation* op) override
+        {
+            HRESULT activated = E_FAIL;
+            ComPtr<IUnknown> unk;
+            result = op->GetActivateResult(&activated, &unk);
+            if (SUCCEEDED(result)) result = activated;
+            if (SUCCEEDED(result)) result = unk.As(&client);
+            SetEvent(done);
+            return S_OK;
+        }
+
+        HANDLE               done = nullptr;
+        HRESULT              result = E_FAIL;
+        ComPtr<IAudioClient> client;
+    };
+
+    // بيفتح "مسجّل" لصوت برنامج واحد (ومعه البرامج اللي هو فتحها، متل كروم)
+    HRESULT ActivateProcessLoopback(DWORD pid, ComPtr<IAudioClient>& client)
+    {
+        AUDIOCLIENT_ACTIVATION_PARAMS params{};
+        params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+        params.ProcessLoopbackParams.TargetProcessId     = pid;
+        params.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+
+        PROPVARIANT pv{};
+        pv.vt             = VT_BLOB;
+        pv.blob.cbSize    = sizeof(params);
+        pv.blob.pBlobData = (BYTE*)&params;
+
+        ComPtr<ActivateHandler> handler = Make<ActivateHandler>();
+        if (!handler || !handler->done)
+            return E_OUTOFMEMORY;
+        ComPtr<IActivateAudioInterfaceAsyncOperation> op;
+        HRESULT hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof(IAudioClient),
+                                                 &pv, handler.Get(), &op);
+        if (FAILED(hr))
+            return hr;
+        if (WaitForSingleObject(handler->done, 5000) != WAIT_OBJECT_0)
+            return E_ABORT;
+        if (SUCCEEDED(handler->result))
+            client = handler->client;
+        return handler->result;
+    }
 }
 
 bool AudioSource::Start()
@@ -101,6 +160,13 @@ size_t AudioSource::Read(int tap, float* dst, size_t frames)
     return n;
 }
 
+size_t AudioSource::Available(int tap)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_taps.find(tap);
+    return it == m_taps.end() ? 0 : it->second.fifo.size() / CHANNELS;
+}
+
 void AudioSource::KeepNewest(int tap, size_t frames)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -161,6 +227,12 @@ void AudioSource::Process(const BYTE* data, UINT32 frames, bool silent)
         m_prevR = r;
     }
 
+    Deliver(out);
+}
+
+// فلاتر + علو + توزيع الصوت على كل الحنفيات
+void AudioSource::Deliver(std::vector<float>& out)
+{
     // الفلاتر (قبل العلو، لحتى البوابة تشتغل على صوتك الحقيقي)
     m_filters.Process(out.data(), out.size() / CHANNELS);
 
@@ -240,6 +312,67 @@ void AudioSource::ThreadMain(std::promise<bool>* ready)
     auto sendReady = [&](bool ok) { if (!readySent) { ready->set_value(ok); readySent = true; } };
 
     const HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    if (m_kind == Kind::Generated)          // ما في جهاز: منصنع الصوت بنفسنا
+    {
+        sendReady(true);
+        GeneratorLoop();
+    }
+    else if (m_kind == Kind::Application)   // صوت برنامج واحد
+    {
+        ComPtr<IAudioClient>        client;
+        ComPtr<IAudioCaptureClient> capture;
+        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+        HRESULT hr = m_pid ? ActivateProcessLoopback(m_pid, client) : E_INVALIDARG;
+        if (SUCCEEDED(hr))
+        {
+            // هون منحن منختار الشكل: 48000، ستيريو، أرقام عشرية (ويندوز بيحوّل لحالو)
+            WAVEFORMATEX fmt{};
+            fmt.wFormatTag      = WAVE_FORMAT_IEEE_FLOAT;
+            fmt.nChannels       = 2;
+            fmt.nSamplesPerSec  = SAMPLE_RATE;
+            fmt.wBitsPerSample  = 32;
+            fmt.nBlockAlign     = fmt.nChannels * fmt.wBitsPerSample / 8;
+            fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
+            hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                    AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                                    2'000'000, 0, &fmt, nullptr);
+        }
+        if (SUCCEEDED(hr)) hr = client->SetEventHandle(event);
+        if (SUCCEEDED(hr)) hr = client->GetService(IID_PPV_ARGS(&capture));
+        if (SUCCEEDED(hr))
+        {
+            m_srcChannels = 2; m_srcRate = SAMPLE_RATE; m_srcBits = 32; m_srcBlock = 8; m_srcFloat = true;
+            m_step = 1.0; m_phase = 0.0; m_prevL = m_prevR = 0.0f;
+            hr = client->Start();
+        }
+        sendReady(SUCCEEDED(hr));
+
+        while (SUCCEEDED(hr) && m_running)
+        {
+            WaitForSingleObject(event, 20);    // ويندوز بينبّهنا لما يجي صوت
+            UINT32 packet = 0;
+            hr = capture->GetNextPacketSize(&packet);
+            while (SUCCEEDED(hr) && packet > 0)
+            {
+                BYTE*  data   = nullptr;
+                UINT32 frames = 0;
+                DWORD  flags  = 0;
+                hr = capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+                if (FAILED(hr))
+                    break;
+                Process(data, frames, (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
+                capture->ReleaseBuffer(frames);
+                hr = capture->GetNextPacketSize(&packet);
+            }
+        }
+        if (client)
+            client->Stop();
+        if (event)
+            CloseHandle(event);
+    }
+    else
     {
         ComPtr<IMMDeviceEnumerator> enumerator;
         ComPtr<IMMDevice>           device;
@@ -343,4 +476,41 @@ void AudioSource::ThreadMain(std::promise<bool>* ready)
 
     if (SUCCEEDED(hrCom))
         CoUninitialize();
+}
+
+// -------------------------------------------------------------
+// النوع Generated: كل 10 ملي ثانية منطلب من الدالة صوت بقدّ الوقت اللي مرق
+// -------------------------------------------------------------
+void AudioSource::GeneratorLoop()
+{
+    LARGE_INTEGER freq, start, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+    LONGLONG produced = 0;
+    std::vector<float> out;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_name.empty())
+            m_name = L"صوت مُولَّد";
+    }
+
+    while (m_running)
+    {
+        Sleep(10);
+        QueryPerformanceCounter(&now);
+        const LONGLONG due = (now.QuadPart - start.QuadPart) * SAMPLE_RATE / freq.QuadPart;
+        LONGLONG frames = due - produced;
+        if (frames <= 0)
+            continue;
+        if (frames > SAMPLE_RATE)          // الجهاز علّق كتير: ما منعوّض أكتر من ثانية
+        {
+            produced = due - SAMPLE_RATE;
+            frames   = SAMPLE_RATE;
+        }
+        out.assign((size_t)frames * CHANNELS, 0.0f);
+        if (m_generator)
+            m_generator(out.data(), (size_t)frames);
+        produced += frames;
+        Deliver(out);
+    }
 }

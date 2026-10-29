@@ -1,5 +1,5 @@
 // =============================================================
-//  Audio.h - مصدر صوت: صوت الكمبيوتر أو المايك
+//  Audio.h - مصدر صوت: صوت الكمبيوتر أو المايك أو برنامج معيّن
 //
 //  كل مصدر بيشتغل بخيط لحالو وبياخد الصوت من ويندوز (WASAPI)
 //  وبيحوّله لشكل موحّد: 48000 عينة بالثانية، ستيريو (قناتين)
@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <atomic>
 #include <deque>
+#include <functional>
 #include <map>
 #include <future>
 #include <mutex>
@@ -30,7 +31,13 @@ struct AudioDevice
 class AudioSource
 {
 public:
-    enum class Kind { System, Microphone };
+    enum class Kind
+    {
+        System,        // كل صوت الكمبيوتر (اللي طالع من السماعات)
+        Microphone,    // المايك
+        Application,   // صوت برنامج واحد بس (ويندوز 10 نسخة 2004 وطالع)
+        Generated      // صوت بيصنعه البرنامج نفسه (مثلاً خلط أصوات البرامج)
+    };
 
     static constexpr UINT32 SAMPLE_RATE = 48000;
     static constexpr UINT32 CHANNELS    = 2;
@@ -63,6 +70,11 @@ public:
     // كل الأجهزة الشغّالة من هالنوع
     static std::vector<AudioDevice> ListDevices(Kind kind);
 
+    // للنوع Application: أي برنامج (رقم العملية) واسمه. لازم قبل Start
+    void SetProcess(DWORD pid, const std::wstring& name) { m_pid = pid; m_name = name; }
+    // للنوع Generated: دالة بتعبّي الصوت (frames × قناتين، جاي فاضي = سكوت)
+    void SetGenerator(std::function<void(float*, size_t)> gen) { m_generator = std::move(gen); }
+
     // كل مستهلك (التسجيل، البث) بياخد "حنفية" إلها مخزن خاص
     int    AddTap();
     void   RemoveTap(int tap);
@@ -71,10 +83,13 @@ public:
     // خود عدد frames من الصوت المخزّن (كل frame = يسار + يمين)
     size_t Read(int tap, float* dst, size_t frames);
     void   KeepNewest(int tap, size_t frames);    // ارمي القديم إذا تجمّع كتير
+    size_t Available(int tap);                    // كم frame مخزّن هلق
 
 private:
     void ThreadMain(std::promise<bool>* ready);   // ready: منقول فيه إذا الجهاز اشتغل
     void Process(const BYTE* data, UINT32 frames, bool silent);
+    void Deliver(std::vector<float>& out);        // فلاتر + علو + توزيع على الحنفيات
+    void GeneratorLoop();                         // للنوع Generated
     float SampleAt(const BYTE* data, UINT32 frame, UINT32 channel) const;
 
     Kind               m_kind;
@@ -95,6 +110,8 @@ private:
     int                m_nextTap = 1;
     std::wstring       m_name;
     std::wstring       m_deviceId;       // فاضي = الافتراضي
+    DWORD              m_pid = 0;        // للنوع Application
+    std::function<void(float*, size_t)> m_generator;   // للنوع Generated
 
     // شكل الصوت اللي جاي من الجهاز
     UINT32 m_srcChannels = 2, m_srcRate = 48000, m_srcBits = 32, m_srcBlock = 8;

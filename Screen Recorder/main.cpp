@@ -29,6 +29,11 @@
 #include "Recorder.h"
 #include "Streamer.h"
 #include "Media.h"
+#include "Ui.h"
+#include "Panel.h"
+#include "MicFiltersPanel.h"
+#include "AppAudio.h"
+#include "AppAudioPanel.h"
 #include <commdlg.h>
 #include <wincrypt.h>
 #include <wincodec.h>
@@ -44,52 +49,6 @@
 #pragma comment(lib, "mfplat.lib")
 
 using Microsoft::WRL::ComPtr;
-
-// =============================================================
-//  الألوان (ثيم داكن)
-// =============================================================
-namespace Theme
-{
-    const D2D1_COLOR_F Background = D2D1::ColorF(0x0E1014);
-    const D2D1_COLOR_F Panel      = D2D1::ColorF(0x16191F);
-    const D2D1_COLOR_F Card       = D2D1::ColorF(0x1D2129);
-    const D2D1_COLOR_F Hover      = D2D1::ColorF(0x252A34);
-    const D2D1_COLOR_F Border     = D2D1::ColorF(0x2A2F3A);
-    const D2D1_COLOR_F Text       = D2D1::ColorF(0xE8EAED);
-    const D2D1_COLOR_F SubText    = D2D1::ColorF(0x8B93A3);
-    const D2D1_COLOR_F Accent     = D2D1::ColorF(0x4F8CFF);
-    const D2D1_COLOR_F Red        = D2D1::ColorF(0xE5484D);
-    const D2D1_COLOR_F RedHover   = D2D1::ColorF(0xF0656A);
-    const D2D1_COLOR_F Green      = D2D1::ColorF(0x3DD68C);
-    const D2D1_COLOR_F Yellow     = D2D1::ColorF(0xF5A524);
-    const D2D1_COLOR_F Off        = D2D1::ColorF(0x3A404D);
-    const D2D1_COLOR_F White      = D2D1::ColorF(0xFFFFFF);
-}
-
-// أيقونات من خط "Segoe MDL2 Assets" (موجود بكل ويندوز 10 و 11)
-namespace Icon
-{
-    const wchar_t* Monitor = L"\uE7F4";
-    const wchar_t* Window  = L"\uE8A7";
-    const wchar_t* Speaker = L"\uE767";
-    const wchar_t* Mic     = L"\uE720";
-    const wchar_t* Muted   = L"\uE74F";
-    const wchar_t* Pause   = L"\uE769";
-    const wchar_t* Play    = L"\uE768";
-    const wchar_t* Folder  = L"\uE838";
-    const wchar_t* Add     = L"\uE710";
-    const wchar_t* Delete  = L"\uE74D";
-    const wchar_t* Eye     = L"\uE890";
-    const wchar_t* Chevron = L"\uE70D";
-    const wchar_t* Live    = L"\uE93E";
-    const wchar_t* More    = L"\uE712";
-    const wchar_t* Camera  = L"\uE722";
-    const wchar_t* Photo   = L"\uEB9F";
-    const wchar_t* Font    = L"\uE8D2";
-    const wchar_t* Replay  = L"\uE81C";
-    const wchar_t* Filter  = L"\uE9E9";
-    const wchar_t* Close   = L"\uE711";
-}
 
 // أرقام العناصر اللي بتنكبس
 enum : int
@@ -109,12 +68,18 @@ enum : int
     ID_REPLAY_SEC_FIRST = 150,  // 4 خيارات (مدة الإعادة)
     ID_TRANSITION_FIRST = 160,  // 3 خيارات (الانتقال بين المشاهد)
     ID_VERTICAL_FIRST   = 170,  // خيارين (طريقة البث العمودي)
+    ID_AUDIO_TRACKS_FIRST = 180,  // خيارين (مسار صوت واحد / مسارات منفصلة)
     ID_LAYER_FIRST   = 1000,    // الطبقة رقم id = ID_LAYER_FIRST + id
     ID_EYE_FIRST     = 3000,
     ID_DELETE_FIRST  = 5000,
     ID_SCENE_FIRST   = 7000,    // المشهد رقم i = ID_SCENE_FIRST + i
     ID_TARGET_TOGGLE_FIRST = 9000,   // تفعيل وجهة البث رقم i
-    ID_TARGET_MENU_FIRST   = 9500    // قائمة وجهة البث رقم i
+    ID_TARGET_MENU_FIRST   = 9500,   // قائمة وجهة البث رقم i
+    ID_APP_ROW_FIRST       = 11000,  // صوت البرنامج رقم i (بقائمة المصادر)
+    ID_APP_MUTE_FIRST      = 11500,
+    ID_APP_DELETE_FIRST    = 12000,
+    ID_APP_VOL_FIRST       = 12500,
+    ID_APP_LAST            = 13000
 };
 
 constexpr UINT_PTR TIMER_FRAME = 1;
@@ -126,19 +91,10 @@ constexpr int      HOTKEY_RECORD = 1, HOTKEY_PAUSE = 2, HOTKEY_STREAM = 3, HOTKE
 HWND  g_hwnd = nullptr;
 UINT  g_dpi  = 96;
 
-// أدوات الرسم
+// أدوات الرسم (الألوان والخطوط وأدوات الرسم الصغيرة صاروا بـ Ui.h)
 ComPtr<ID2D1Factory>          g_d2d;
-ComPtr<IDWriteFactory>        g_dwrite;
-ComPtr<ID2D1HwndRenderTarget> g_rt;
-ComPtr<ID2D1SolidColorBrush>  g_brush;
-ComPtr<IDWriteTextFormat>     g_fTitle, g_fSection, g_fBody, g_fSmall, g_fSmallEnd, g_fSmallLtr, g_fCenter, g_fSegment,
-                              g_fTimer, g_fIcon, g_fIconBig;
-
-// الماوس والأزرار
-struct Hit { D2D1_RECT_F rect; int id; };
-std::vector<Hit> g_hits;               // وين كل زر بآخر رسمة
-D2D1_POINT_2F    g_mouse = { -1, -1 };
 float            g_scroll = 0;         // تمرير قائمة الطبقات
+float            g_scrollMax = 0;      // أقصى تمرير للتبويب الحالي (لحتى العجلة توقف عند النهاية)
 D2D1_RECT_F      g_listRect{};
 
 // المشهد اللي شغّال هلق (هو اللي بيتسجّل وبيبيّن بالمعاينة)
@@ -149,6 +105,7 @@ struct SceneData
 {
     std::wstring            name;
     std::vector<SceneLayer> layers;
+    std::vector<AppAudioEntry> apps;   // أصوات البرامج بهالمشهد
 };
 std::vector<SceneData> g_scenes;
 int                    g_activeScene = 0;
@@ -171,6 +128,13 @@ AudioSource* g_volDrag = nullptr;      // شريط العلو اللي عم نس
 D2D1_RECT_F  g_volTrack[2] = {};       // مكان شريط العلو (0 = النظام ، 1 = الميكروفون)
 float g_systemLevel = 0, g_micLevel = 0;
 
+// أصوات البرامج (كل مشهد إله برامجه، شوف AppAudio.h)
+AppAudioMixer            g_appMixer;
+std::vector<float>       g_appLevels;          // مستوى صوت كل برنامج (للمقياس)
+std::vector<D2D1_RECT_F> g_appTracks;          // مكان شريط علو كل برنامج بآخر رسمة
+int                      g_appVolDrag = -1;    // شريط البرنامج اللي عم نسحبه (-1 = ولا واحد)
+D2D1_RECT_F              g_appVolTrack{};
+
 // البث المباشر
 Streamer                  g_streamer;
 std::vector<StreamTarget> g_targets;            // كل الوجهات (المفعّلة والمطفية)
@@ -192,9 +156,6 @@ int       g_transitionChoice = 1;                          // 0 فوري ، 1 ت
 const int TRANSITION_MS[]    = { 0, 300, 700 };
 int       g_fadeTicks = 0;                                 // وقت التلاشي: منحدّث المعاينة أسرع
 
-// منطقة الكبس المسموحة (للقوائم اللي بتتمرّر: ما منخلّي شي مخفي ينكبس)
-bool        g_hitClipOn = false;
-D2D1_RECT_F g_hitClip{};
 
 // التسجيل
 Recorder     g_recorder;
@@ -227,6 +188,7 @@ int          g_quality        = 2;     // 0 منخفضة ، 1 متوسطة ، 2 
 UINT32       g_customMbps     = 12;
 int          g_encoderMode    = 0;     // 0 تلقائي ، 1 بطاقة الرسومات ، 2 المعالج
 bool         g_crashSafe      = true;  // MP4 آمن (مقطّع)
+bool         g_separateTracks = false; // مسار صوت لكل مصدر (للمونتاج)
 std::wstring g_encoderName;            // اسم المشفّر المختار (لبطاقة الرسومات)
 std::vector<Recorder::EncoderInfo> g_encoders;
 std::wstring g_settingsPath;
@@ -238,115 +200,10 @@ void RestartReplayIfActive();
 // في شي شغّال (تسجيل أو بث)؟ وقتها منقفل الإعدادات اللي بتأثّر عليهم
 bool Busy() { return g_recorder.IsRecording() || g_streamer.IsActive(); }
 
-// =============================================================
-//  أدوات رسم صغيرة
-// =============================================================
-bool Inside(const D2D1_RECT_F& r, D2D1_POINT_2F p)
-{
-    return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom;
-}
-
-D2D1_RECT_F Rect(float l, float t, float r, float b) { return D2D1::RectF(l, t, r, b); }
-
-void Fill(const D2D1_RECT_F& r, const D2D1_COLOR_F& c, float radius = 0)
-{
-    g_brush->SetColor(c);
-    if (radius > 0) g_rt->FillRoundedRectangle(D2D1::RoundedRect(r, radius, radius), g_brush.Get());
-    else            g_rt->FillRectangle(r, g_brush.Get());
-}
-
-void Stroke(const D2D1_RECT_F& r, const D2D1_COLOR_F& c, float radius, float width = 1)
-{
-    g_brush->SetColor(c);
-    if (radius > 0) g_rt->DrawRoundedRectangle(D2D1::RoundedRect(r, radius, radius), g_brush.Get(), width);
-    else            g_rt->DrawRectangle(r, g_brush.Get(), width);
-}
-
-void Circle(float cx, float cy, float radius, const D2D1_COLOR_F& c)
-{
-    g_brush->SetColor(c);
-    g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), radius, radius), g_brush.Get());
-}
-
-void Text(const std::wstring& s, IDWriteTextFormat* f, const D2D1_RECT_F& r, const D2D1_COLOR_F& c)
-{
-    g_brush->SetColor(c);
-    g_rt->DrawTextW(s.c_str(), (UINT32)s.size(), f, r, g_brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-}
-
-D2D1_COLOR_F WithAlpha(D2D1_COLOR_F c, float a) { c.a = a; return c; }
-
-// بيسجّل زر، وبيرجّع إذا الماوس فوقه
-bool AddHit(const D2D1_RECT_F& r, int id)
-{
-    D2D1_RECT_F rr = r;
-    if (g_hitClipOn)
-    {
-        rr.left   = std::max(rr.left, g_hitClip.left);
-        rr.top    = std::max(rr.top, g_hitClip.top);
-        rr.right  = std::min(rr.right, g_hitClip.right);
-        rr.bottom = std::min(rr.bottom, g_hitClip.bottom);
-        if (rr.right <= rr.left || rr.bottom <= rr.top)
-            return false;
-    }
-    g_hits.push_back({ rr, id });
-    return Inside(rr, g_mouse);
-}
-
-// خط نص: rtl = من اليمين لليسار
-ComPtr<IDWriteTextFormat> MakeFormat(float size, DWRITE_FONT_WEIGHT weight, bool rtl,
-                                     DWRITE_TEXT_ALIGNMENT align, const wchar_t* family = L"Segoe UI")
-{
-    ComPtr<IDWriteTextFormat> f;
-    g_dwrite->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                               size, rtl ? L"ar" : L"en-us", &f);
-    f->SetReadingDirection(rtl ? DWRITE_READING_DIRECTION_RIGHT_TO_LEFT : DWRITE_READING_DIRECTION_LEFT_TO_RIGHT);
-    f->SetTextAlignment(align);
-    f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-
-    // إذا النص طويل منحط "..." بآخره
-    ComPtr<IDWriteInlineObject> ellipsis;
-    if (SUCCEEDED(g_dwrite->CreateEllipsisTrimmingSign(f.Get(), &ellipsis)))
-    {
-        DWRITE_TRIMMING trim{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
-        f->SetTrimming(&trim, ellipsis.Get());
-    }
-    return f;
-}
-
-void CreateTextFormats()
-{
-    const auto LEAD = DWRITE_TEXT_ALIGNMENT_LEADING;    // بالعربي = يمين
-    const auto MID  = DWRITE_TEXT_ALIGNMENT_CENTER;
-    g_fTitle    = MakeFormat(19, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, LEAD);
-    g_fSection  = MakeFormat(13, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, LEAD);
-    g_fBody     = MakeFormat(14, DWRITE_FONT_WEIGHT_NORMAL, true, LEAD);
-    g_fSmall    = MakeFormat(12, DWRITE_FONT_WEIGHT_NORMAL, true, LEAD);
-    g_fSmallEnd = MakeFormat(12, DWRITE_FONT_WEIGHT_NORMAL, true, DWRITE_TEXT_ALIGNMENT_TRAILING);   // على اليسار
-    g_fSmallLtr = MakeFormat(11.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false, DWRITE_TEXT_ALIGNMENT_CENTER);
-    g_fSegment  = MakeFormat(12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, MID);
-    g_fCenter   = MakeFormat(14, DWRITE_FONT_WEIGHT_SEMI_BOLD, true, MID);
-    g_fTimer    = MakeFormat(26, DWRITE_FONT_WEIGHT_SEMI_BOLD, false, MID);
-    g_fIcon     = MakeFormat(16, DWRITE_FONT_WEIGHT_NORMAL, false, MID, L"Segoe MDL2 Assets");
-    g_fIconBig  = MakeFormat(20, DWRITE_FONT_WEIGHT_NORMAL, false, MID, L"Segoe MDL2 Assets");
-}
-
 // "1920×1080" مع علامات لحتى ما تنقلب الأرقام بنص عربي
 std::wstring SizeText(int w, int h)
 {
     return L"\u202A" + std::to_wstring(w) + L"×" + std::to_wstring(h) + L"\u202C";
-}
-
-// عرض نص بالنقاط (لحتى نعرف قدّيش نعمل الزر عريض)
-float TextWidth(const std::wstring& s, IDWriteTextFormat* f)
-{
-    ComPtr<IDWriteTextLayout> layout;
-    if (FAILED(g_dwrite->CreateTextLayout(s.c_str(), (UINT32)s.size(), f, 2000, 50, &layout)))
-        return 0;
-    DWRITE_TEXT_METRICS m{};
-    layout->GetMetrics(&m);
-    return m.widthIncludingTrailingWhitespace;
 }
 
 // =============================================================
@@ -1202,6 +1059,31 @@ void ShowLayerMenu(int id, POINT screenPt)
     else               LayerCommand(id, cmd);
 }
 
+void ShowMessage(const std::wstring& text, bool isError);   // معرّفة تحت
+
+// نافذة "إضافة صوت برنامج" (شوف AppAudioPanel.cpp)
+void ShowAddAppAudioMenu(POINT)
+{
+    g_panels.Open(std::make_unique<AppAudioPanel>(
+        [](const std::wstring& exe)
+        {
+            for (const AppAudioEntry& e : g_appMixer.Entries())
+                if (_wcsicmp(e.exePath.c_str(), exe.c_str()) == 0)
+                    return true;
+            return false;
+        },
+        [](const AudioApp& app)
+        {
+            const size_t before = g_appMixer.Count();
+            g_appMixer.Add(app);
+            if (g_appMixer.Count() > before && !g_appMixer.IsConnected((int)before))
+                ShowMessage(L"تعذّر التقاط صوت البرنامج (يتطلّب ويندوز 10 الإصدار 2004 أو أحدث)", true);
+            else
+                ShowMessage(L"أُضيف صوت " + app.name, false);
+            SaveScenes();
+        }));
+}
+
 void ShowAddSourceMenu(POINT screenPt)
 {
     const std::vector<CameraInfo>    cams    = ListCameras();
@@ -1212,6 +1094,8 @@ void ShowAddSourceMenu(POINT screenPt)
     const int imageItem = (int)items.size();
     items.push_back(L"صورة من ملف…");
     items.push_back(L"نص…");
+    const int appItem = (int)items.size();
+    items.push_back(L"صوت برنامج…");
     items.push_back(L"");
     const int firstTarget = (int)items.size();
     for (const CaptureTarget& t : targets)
@@ -1252,6 +1136,11 @@ void ShowAddSourceMenu(POINT screenPt)
         l.background  = true;
         AddMediaLayer(l);
     }
+    else if (pick == appItem)                     // صوت برنامج
+    {
+        ShowAddAppAudioMenu(screenPt);
+        return;
+    }
     else if (pick >= firstTarget)
         AddLayer(targets[pick - firstTarget]);
     SaveScenes();
@@ -1279,7 +1168,21 @@ void StoreActiveScene()
 {
     std::lock_guard<std::mutex> lock(g_scene.mutex);
     if (g_activeScene >= 0 && g_activeScene < (int)g_scenes.size())
+    {
         g_scenes[g_activeScene].layers = g_scene.layers;
+        g_scenes[g_activeScene].apps   = g_appMixer.Entries();
+    }
+}
+
+// في ولا مشهد فيه أصوات برامج؟ (وقتها منضيف الخلّاط للتسجيل والبث)
+bool AnySceneHasApps()
+{
+    if (g_appMixer.Count() > 0)
+        return true;
+    for (const SceneData& s : g_scenes)
+        if (!s.apps.empty())
+            return true;
+    return false;
 }
 
 void SwitchScene(int index)
@@ -1287,6 +1190,8 @@ void SwitchScene(int index)
     if (index < 0 || index >= (int)g_scenes.size() || index == g_activeScene)
         return;
     StoreActiveScene();
+    g_appMixer.SetEntries(g_scenes[index].apps);    // أصوات برامج المشهد الجديد
+    g_appLevels.clear();
     // التسجيل بيكمّل بالمشهد الجديد فوراً (مع تلاشي ناعم إذا مفعّل)
     g_scene.ReplaceLayers(g_scenes[index].layers, TRANSITION_MS[g_transitionChoice]);
     if (TRANSITION_MS[g_transitionChoice] > 0)
@@ -1317,6 +1222,8 @@ void AddScene()
         std::lock_guard<std::mutex> lock(g_scene.mutex);
         g_scene.layers.clear();
     }
+    g_appMixer.SetEntries({});
+    g_appLevels.clear();
     g_activeScene   = (int)g_scenes.size() - 1;
     g_selectedLayer = 0;
 }
@@ -1352,6 +1259,8 @@ void DeleteScene(int index)
         std::lock_guard<std::mutex> lock(g_scene.mutex);
         g_scene.layers = g_scenes[g_activeScene].layers;
         g_selectedLayer = 0;
+        g_appMixer.SetEntries(g_scenes[g_activeScene].apps);
+        g_appLevels.clear();
     }
 }
 
@@ -1389,6 +1298,9 @@ void SaveScenes()
                      l.x, l.y, l.w, l.h, l.visible ? 1 : 0,
                      Clean(l.target.className).c_str(), Clean(l.target.exePath).c_str(), Clean(l.target.name).c_str());
         }
+        for (const AppAudioEntry& a : s.apps)       // أصوات البرامج
+            fwprintf(f, L"P\t%d\t%d\t%ls\t%ls\n", (int)std::lround(a.volume * 100), a.muted ? 1 : 0,
+                     Clean(a.exePath).c_str(), Clean(a.name).c_str());
     }
     fclose(f);
 }
@@ -1449,6 +1361,16 @@ bool LoadScenes()
             l.target.isMonitor = false;
             if (l.w > 1 && l.h > 1)
                 g_scenes.back().layers.push_back(l);
+        }
+        else if (p[0] == L"P" && p.size() >= 5 && !g_scenes.empty())   // صوت برنامج
+        {
+            AppAudioEntry a;
+            a.volume  = std::clamp(_wtoi(p[1].c_str()), 0, 200) / 100.0f;
+            a.muted   = p[2] == L"1";
+            a.exePath = p[3];
+            a.name    = p[4];
+            if (!a.exePath.empty())
+                g_scenes.back().apps.push_back(a);
         }
         else if (p[0] == L"L" && p.size() >= 14 && !g_scenes.empty())
         {
@@ -1665,6 +1587,7 @@ void SaveSettings()
     put(L"EncoderMode", std::to_wstring(g_encoderMode));
     put(L"EncoderName", g_encoderName);
     put(L"CrashSafe",   g_crashSafe ? L"1" : L"0");
+    put(L"SeparateTracks", g_separateTracks ? L"1" : L"0");
     put(L"SystemAudio", g_systemOn ? L"1" : L"0");
     put(L"Microphone",  g_micOn ? L"1" : L"0");
     put(L"SystemDevice", g_systemAudio.DeviceId());
@@ -1682,6 +1605,14 @@ void SaveSettings()
     put(L"MicNoise",     g_micAudio.Filters().noise ? L"1" : L"0");
     put(L"MicGate",      g_micAudio.Filters().gate ? L"1" : L"0");
     put(L"MicLeveler",   g_micAudio.Filters().leveler ? L"1" : L"0");
+    // إعدادات الفلاتر (منحفظها أرقام صحيحة: الديسيبل والملّي ثانية متل ما هي، والنسب ×100 أو ×10)
+    const MicFilters& mf = g_micAudio.Filters();
+    put(L"MicNoiseStrength", std::to_wstring((int)std::lround(mf.noiseStrength * 100)));
+    put(L"MicGateOpenDb",    std::to_wstring((int)std::lround(mf.gateOpenDb.load())));
+    put(L"MicGateHoldMs",    std::to_wstring((int)std::lround(mf.gateHoldMs.load())));
+    put(L"MicGateCloseMs",   std::to_wstring((int)std::lround(mf.gateCloseMs.load())));
+    put(L"MicLevelGainDb",   std::to_wstring((int)std::lround(mf.levelGainDb.load())));
+    put(L"MicLevelRatio",    std::to_wstring((int)std::lround(mf.levelRatio * 10)));
 }
 
 void LoadSettings()
@@ -1713,6 +1644,7 @@ void LoadSettings()
     g_encoderMode  = std::clamp(getInt(L"EncoderMode", 0), 0, 2);
     g_encoderName  = getStr(L"EncoderName");
     g_crashSafe    = getInt(L"CrashSafe", 1) != 0;
+    g_separateTracks = getInt(L"SeparateTracks", 0) != 0;
     g_systemOn     = getInt(L"SystemAudio", 1) != 0;
     g_micOn        = getInt(L"Microphone", 0) != 0;
     g_systemAudio.SetDeviceId(getStr(L"SystemDevice"));
@@ -1730,6 +1662,21 @@ void LoadSettings()
     g_micAudio.Filters().noise   = getInt(L"MicNoise", 0) != 0;
     g_micAudio.Filters().gate    = getInt(L"MicGate", 0) != 0;
     g_micAudio.Filters().leveler = getInt(L"MicLeveler", 0) != 0;
+    {
+        MicFilters& mf = g_micAudio.Filters();
+        // GetPrivateProfileInt ما بيقرأ الأرقام السالبة صح، فمنقرأها كنص
+        auto getF = [&](const wchar_t* key, float def)
+        {
+            const std::wstring v = getStr(key);
+            return v.empty() ? def : (float)_wtoi(v.c_str());
+        };
+        mf.noiseStrength = std::clamp(getF(L"MicNoiseStrength", MicFilters::DEF_NOISE_STRENGTH * 100) / 100.0f, 0.0f, 2.0f);
+        mf.gateOpenDb    = std::clamp(getF(L"MicGateOpenDb", MicFilters::DEF_GATE_OPEN_DB), -60.0f, -10.0f);
+        mf.gateHoldMs    = std::clamp(getF(L"MicGateHoldMs", MicFilters::DEF_GATE_HOLD_MS), 0.0f, 1000.0f);
+        mf.gateCloseMs   = std::clamp(getF(L"MicGateCloseMs", MicFilters::DEF_GATE_CLOSE_MS), 20.0f, 1000.0f);
+        mf.levelGainDb   = std::clamp(getF(L"MicLevelGainDb", MicFilters::DEF_LEVEL_GAIN_DB), 0.0f, 20.0f);
+        mf.levelRatio    = std::clamp(getF(L"MicLevelRatio", MicFilters::DEF_LEVEL_RATIO * 10) / 10.0f, 1.5f, 8.0f);
+    }
     g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replayChoice]);
 }
 
@@ -1868,8 +1815,10 @@ void StartRecording()
     opt.bitrate = CurrentBitrate();
     opt.encoder = (EncoderMode)g_encoderMode;
     opt.crashSafe = g_crashSafe;
+    opt.separateTracks = g_separateTracks;
     if (g_systemOn && g_systemAudio.IsRunning()) opt.audio.push_back(&g_systemAudio);
     if (g_micOn && g_micAudio.IsRunning())       opt.audio.push_back(&g_micAudio);
+    if (AnySceneHasApps())                       opt.audio.push_back(&g_appMixer.Output());
 
     const HRESULT hr = g_recorder.Start(opt);
     if (SUCCEEDED(hr))
@@ -2293,6 +2242,7 @@ void StartStreaming()
     opt.encoder   = (EncoderMode)g_encoderMode;
     if (g_systemOn && g_systemAudio.IsRunning()) opt.audio.push_back(&g_systemAudio);
     if (g_micOn && g_micAudio.IsRunning())       opt.audio.push_back(&g_micAudio);
+    if (AnySceneHasApps())                       opt.audio.push_back(&g_appMixer.Output());
 
     std::wstring error;
     if (g_streamer.Start(opt, error))
@@ -2376,6 +2326,7 @@ void StartReplay(bool quiet = false)
     opt.encoder   = (EncoderMode)g_encoderMode;
     if (g_systemOn && g_systemAudio.IsRunning()) opt.audio.push_back(&g_systemAudio);
     if (g_micOn && g_micAudio.IsRunning())       opt.audio.push_back(&g_micAudio);
+    if (AnySceneHasApps())                       opt.audio.push_back(&g_appMixer.Output());
 
     std::wstring error;
     if (!g_replay.Start(opt, error))
@@ -2434,19 +2385,13 @@ void RestartReplayIfActive()
     StartReplay(true);
 }
 
-// قائمة فلاتر المايك
-void ShowMicFilters(POINT pt)
+// نافذة فلاتر المايك (نافذة داخلية، شوف MicFiltersPanel.cpp)
+void ShowMicFilters()
 {
-    MicFilters& f = g_micAudio.Filters();
-    auto mark = [](bool on) { return on ? std::wstring(L"✓   ") : std::wstring(L"      "); };
-    const int pick = ShowMenu({ mark(f.noise)   + L"إزالة الضجيج (المروحة، المكيّف، الطنين)",
-                                mark(f.gate)    + L"البوابة (تُسكت المايك حين لا تتكلم)",
-                                mark(f.leveler) + L"توحيد مستوى الصوت (واضح وثابت)" }, -1, pt);
-    if (pick == 0) f.noise   = !f.noise;
-    if (pick == 1) f.gate    = !f.gate;
-    if (pick == 2) f.leveler = !f.leveler;
-    if (pick >= 0)
-        SaveSettings();
+    g_panels.Open(std::make_unique<MicFiltersPanel>(
+        g_micAudio,
+        [] { return g_micOn && g_micAudio.IsRunning(); },
+        [] { SaveSettings(); }));
 }
 
 void OpenFolder()
@@ -2636,27 +2581,6 @@ void DrawPreview(const D2D1_RECT_F& area)
          Rect(area.left + 16, area.bottom - 42, area.right - 16, area.bottom - 14), Theme::Off);
 }
 
-// ---------- مفتاح تشغيل/إطفاء ----------
-void DrawToggle(float x, float y, bool on, bool enabled)
-{
-    // وقت التسجيل المفتاح مقفول، بس منخلّي لونه واضح (أزرق = شغّال ، رمادي = مطفي)
-    // لحتى تعرف حالته بنظرة وحدة
-    const D2D1_RECT_F track = Rect(x, y, x + 42, y + 24);
-    Fill(track, on ? Theme::Accent : (enabled ? Theme::Off : WithAlpha(Theme::Off, 0.6f)), 12);
-    Circle(on ? x + 30 : x + 12, y + 12, 8, D2D1::ColorF(0xFFFFFF, (on || enabled) ? 1.0f : 0.6f));
-}
-
-// ---------- شريط مستوى الصوت ----------
-void DrawMeter(const D2D1_RECT_F& r, float level, bool active)
-{
-    Fill(r, Theme::Border, 3);
-    if (!active || level <= 0)
-        return;
-    const D2D1_COLOR_F c = level < 0.7f ? Theme::Green : (level < 0.9f ? Theme::Yellow : Theme::Red);
-    const float w = (r.right - r.left) * level;
-    Fill(Rect(r.right - w, r.top, r.right, r.bottom), c, 3);
-}
-
 // ---------- سطر مصدر صوت ----------
 void DrawAudioRow(const D2D1_RECT_F& r, const wchar_t* icon, const wchar_t* title, AudioSource& src,
                   bool on, float level, int toggleId, int deviceId, int muteId, int volId, int index)
@@ -2743,21 +2667,64 @@ void SetVolumeFromX(AudioSource& src, const D2D1_RECT_F& track, float x)
     src.SetVolume(vol);
 }
 
-// ---------- أزرار متلاصقة (نختار واحد منها) ----------
-void DrawSegmented(const D2D1_RECT_F& r, const std::vector<std::wstring>& labels, int selected, int firstId, bool enabled)
+// من مكان الماوس لعلو (0..2، مع مغناطيس على 100%)
+float VolumeAtX(const D2D1_RECT_F& track, float x)
 {
-    Fill(r, Theme::Card, 9);
-    const float w = (r.right - r.left) / labels.size();
-    for (size_t i = 0; i < labels.size(); ++i)
+    const float f = std::clamp((track.right - x) / (track.right - track.left), 0.0f, 1.0f);
+    const float vol = f * 2.0f;
+    return std::fabs(vol - 1.0f) < 0.05f ? 1.0f : vol;
+}
+
+// ---------- سطر صوت برنامج (بقائمة المصادر) ----------
+void DrawAppAudioRow(const D2D1_RECT_F& row, int i)
+{
+    const AppAudioEntry e = g_appMixer.Entry(i);
+    const bool connected  = g_appMixer.IsConnected(i);
+
+    const D2D1_RECT_F del  = Rect(row.left + 6, row.top + 8, row.left + 36, row.top + 38);
+    const D2D1_RECT_F mute = Rect(row.left + 40, row.top + 8, row.left + 70, row.top + 38);
+    const bool hover     = AddHit(row, ID_APP_ROW_FIRST + i);
+    const bool delHover  = AddHit(del, ID_APP_DELETE_FIRST + i);
+    const bool muteHover = AddHit(mute, ID_APP_MUTE_FIRST + i);
+
+    Fill(row, hover ? Theme::Hover : Theme::Card, 10);
+    Text(Icon::Speaker, g_fIconBig.Get(), Rect(row.right - 44, row.top + 2, row.right - 10, row.top + 40),
+         connected ? Theme::Accent : Theme::SubText);
+    Text(e.name, g_fBody.Get(), Rect(row.left + 76, row.top + 4, row.right - 50, row.top + 24),
+         connected ? Theme::Text : Theme::SubText);
+
+    std::wstring sub = L"صوت برنامج";
+    D2D1_COLOR_F subColor = Theme::SubText;
+    if (!connected)   { sub = L"البرنامج غير مفتوح"; subColor = Theme::Yellow; }
+    else if (e.muted) { sub = L"مكتوم"; subColor = Theme::Red; }
+    Text(sub, g_fSmall.Get(), Rect(row.left + 76, row.top + 23, row.right - 50, row.top + 41), subColor);
+
+    if (delHover)  Fill(del, D2D1::ColorF(0xE5484D, 0.2f), 6);
+    if (muteHover) Fill(mute, Theme::Hover, 6);
+    Text(Icon::Delete, g_fIcon.Get(), del, delHover ? Theme::Red : Theme::SubText);
+    Text(e.muted ? Icon::Muted : Icon::Speaker, g_fIcon.Get(), mute, e.muted ? Theme::Red : Theme::Text);
+
+    // شريط العلو + مستوى الصوت جوّاته (من اليمين لليسار متل باقي الأشرطة)
+    const float cy = row.bottom - 13;
+    const D2D1_RECT_F track = Rect(row.left + 58, cy - 3, row.right - 14, cy + 3);
+    const float tw = track.right - track.left;
+    if (i < (int)g_appTracks.size())
+        g_appTracks[i] = track;
+    AddHit(Rect(track.left - 8, cy - 10, track.right + 8, cy + 10), ID_APP_VOL_FIRST + i);
+
+    Fill(track, Theme::Border, 3);
+    const float level = i < (int)g_appLevels.size() ? g_appLevels[i] : 0.0f;
+    if (connected && !e.muted && level > 0)
     {
-        const float right = r.right - i * w;               // الخيار الأول على اليمين
-        const D2D1_RECT_F seg = Rect(right - w + 3, r.top + 3, right - 3, r.bottom - 3);
-        const bool hover = AddHit(seg, firstId + (int)i) && enabled;
-        const bool sel   = ((int)i == selected);
-        if (sel)        Fill(seg, enabled ? Theme::Accent : Theme::Off, 7);
-        else if (hover) Fill(seg, Theme::Hover, 7);
-        Text(labels[i], g_fSegment.Get(), seg, sel ? Theme::White : (enabled ? Theme::Text : Theme::SubText));
+        const D2D1_COLOR_F c = level < 0.7f ? Theme::Green : (level < 0.9f ? Theme::Yellow : Theme::Red);
+        Fill(Rect(track.right - tw * level, track.top, track.right, track.bottom), WithAlpha(c, 0.85f), 3);
     }
+    const bool  dragging = (g_appVolDrag == i);
+    const float kx = track.right - tw * (e.volume / 2.0f);
+    Circle(kx, cy, dragging ? 8.0f : 7.0f, e.muted ? Theme::Off : Theme::White);
+    Circle(kx, cy, 3.0f, e.muted ? Theme::SubText : Theme::Accent);
+    Text(std::to_wstring((int)std::lround(e.volume * 100)) + L"%", g_fSmallLtr.Get(),
+         Rect(row.left + 8, cy - 10, row.left + 54, cy + 10), e.muted ? Theme::Off : (dragging ? Theme::Accent : Theme::SubText));
 }
 
 // ---------- تبويب المصادر: طبقات المشهد + الصوت ----------
@@ -2778,11 +2745,17 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
     g_scene.Snapshot(cw, ch, layers);
 
     const float rowH = 50, gap = 4;
-    const float contentH = layers.size() * (rowH + gap);
+    // أصوات البرامج بتنعرض بعد الطبقات: عنوان + سطر لكل برنامج (+ تنبيه إذا صوت النظام شغّال)
+    const int   appCount = (int)g_appMixer.Count();
+    const float appRowH  = 64;
+    const bool  appWarn  = appCount > 0 && g_systemOn;
+    const float appsH    = appCount == 0 ? 0 : 32 + appCount * (appRowH + gap) + (appWarn ? 40 : 0);
+    const float contentH = layers.size() * (rowH + gap) + appsH;
     const float listH    = g_listRect.bottom - g_listRect.top;
-    g_scroll = std::clamp(g_scroll, 0.0f, std::max(0.0f, contentH - listH));
+    g_scrollMax = std::max(0.0f, contentH - listH);
+    g_scroll = std::clamp(g_scroll, 0.0f, g_scrollMax);
 
-    if (layers.empty())
+    if (layers.empty() && appCount == 0)
         Text(L"لا توجد مصادر بعد", g_fCenter.Get(), g_listRect, Theme::SubText);
 
     g_rt->PushAxisAlignedClip(g_listRect, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -2837,6 +2810,31 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
         Text(Icon::Delete, g_fIcon.Get(), del, delHover ? Theme::Red : Theme::SubText);
         Text(Icon::Eye, g_fIcon.Get(), eye, l.visible ? Theme::Text : Theme::Off);
     }
+
+    // ---- أصوات البرامج ----
+    g_appTracks.assign(appCount, D2D1_RECT_F{ -1, -1, -1, -1 });
+    if (appCount > 0)
+    {
+        g_hitClipOn = true;               // اللي برّا القائمة (مخفي بالتمرير) ما بينكبس
+        g_hitClip   = g_listRect;
+        float ay = g_listRect.top + layers.size() * (rowH + gap) - g_scroll;
+        Text(L"أصوات البرامج", g_fSection.Get(), Rect(g_listRect.left + 10, ay + 6, g_listRect.right - 10, ay + 28), Theme::SubText);
+        ay += 32;
+        for (int i = 0; i < appCount; ++i)
+        {
+            if (ay + appRowH >= g_listRect.top && ay <= g_listRect.bottom)
+                DrawAppAudioRow(Rect(g_listRect.left, ay, g_listRect.right, ay + appRowH), i);
+            ay += appRowH + gap;
+        }
+        if (appWarn)
+        {
+            Text(L"«صوت النظام» يلتقط هذه البرامج أيضًا،", g_fSmall.Get(),
+                 Rect(g_listRect.left + 10, ay + 2, g_listRect.right - 10, ay + 20), Theme::Yellow);
+            Text(L"فأطفئه لتجنّب تكرار الصوت", g_fSmall.Get(),
+                 Rect(g_listRect.left + 10, ay + 20, g_listRect.right - 10, ay + 38), Theme::Yellow);
+        }
+        g_hitClipOn = false;
+    }
     g_rt->PopAxisAlignedClip();
 
     // ---- قسم الصوت ----
@@ -2861,6 +2859,7 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
     g_rt->PushAxisAlignedClip(g_listRect, D2D1_ANTIALIAS_MODE_ALIASED);
     g_hitClipOn = true;
     g_hitClip   = g_listRect;
+    g_scroll = std::clamp(g_scroll, 0.0f, g_scrollMax);   // قبل الرسم، لحتى ما ينزل أبعد من النهاية
     y -= g_scroll;
 
     auto Label = [&](const wchar_t* s) { Text(s, g_fSection.Get(), Rect(L, y, R, y + 22), Theme::SubText); y += 24; };
@@ -2915,6 +2914,18 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
     Hint(g_crashSafe ? std::wstring(L"لا يضيع التسجيل إذا تعطّل البرنامج أو انقطعت الكهرباء")
                      : std::wstring(L"يضيع التسجيل كله إذا تعطّل البرنامج قبل الإيقاف"));
 
+    // 6.5) مسارات الصوت
+    Label(L"مسارات الصوت");
+    DrawSegmented(Rect(L, y, R, y + 34), { L"مسار واحد", L"مسارات منفصلة" }, g_separateTracks ? 1 : 0, ID_AUDIO_TRACKS_FIRST, !locked);
+    y += 38;
+    if (g_separateTracks)
+    {
+        Hint(L"المسار 1: الكل، ثم النظام، الميكروفون، البرامج");
+        Hint(L"مفيد للمونتاج: تعدّل كل صوت وحده");
+    }
+    else
+        Hint(L"كل الأصوات مدمجة في مسار واحد");
+
     // 7) الانتقال بين المشاهد (بيشتغل حتى وقت التسجيل)
     Label(L"الانتقال بين المشاهد");
     DrawSegmented(Rect(L, y, R, y + 34), { L"فوري", L"تلاشٍ سريع", L"تلاشٍ ناعم" }, g_transitionChoice, ID_TRANSITION_FIRST, true);
@@ -2940,7 +2951,8 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
     // حدود التمرير
     const float contentH = y + g_scroll - top;
     const float viewH    = g_listRect.bottom - g_listRect.top;
-    g_scroll = std::clamp(g_scroll, 0.0f, std::max(0.0f, contentH - viewH));
+    g_scrollMax = std::max(0.0f, contentH - viewH);
+    g_scroll = std::clamp(g_scroll, 0.0f, g_scrollMax);
     g_hitClipOn = false;
     g_rt->PopAxisAlignedClip();
 }
@@ -2963,7 +2975,8 @@ void DrawStreamTab(const D2D1_RECT_F& side, float y)
     const float rowH = 62, gap = 6;
     const float contentH = g_targets.size() * (rowH + gap);
     const float listH    = g_listRect.bottom - g_listRect.top;
-    g_scroll = std::clamp(g_scroll, 0.0f, std::max(0.0f, contentH - listH));
+    g_scrollMax = std::max(0.0f, contentH - listH);
+    g_scroll = std::clamp(g_scroll, 0.0f, g_scrollMax);
 
     if (g_targets.empty())
     {
@@ -3198,11 +3211,19 @@ void Paint()
     const float W = size.width, H = size.height;
     const float sideW = 350;
 
+    // إذا في نافذة داخلية مفتوحة: الواجهة اللي تحتها ما بتتفاعل مع الماوس
+    const D2D1_POINT_2F realMouse = g_mouse;
+    if (g_panels.IsOpen())
+        g_mouse = D2D1::Point2F(-1, -1);
+
     DrawTopBar(W);
     const D2D1_RECT_F side = Rect(W - 16 - sideW, 68, W - 16, H - 104);
     DrawPreview(Rect(16, 68, side.left - 16, H - 104));
     DrawSidebar(side);
     DrawBottomBar(Rect(16, H - 90, W - 16, H - 16));
+
+    g_mouse = realMouse;
+    g_panels.Draw(W, H);     // النافذة الداخلية فوق كلشي
 
     if (g_rt->EndDraw() == D2DERR_RECREATE_TARGET)
         DiscardRenderTarget();
@@ -3405,6 +3426,26 @@ void OnClick(int id, D2D1_POINT_2F p)
     const bool rec = Busy();
     const POINT screen = DipToScreen(p.x, p.y);
 
+    // أصوات البرامج
+    if (id >= ID_APP_ROW_FIRST && id < ID_APP_LAST)
+    {
+        if (id >= ID_APP_VOL_FIRST)
+            return;                                   // الشريط بينسحب (مش كبسة)
+        if (id >= ID_APP_DELETE_FIRST)
+        {
+            g_appMixer.Remove(id - ID_APP_DELETE_FIRST);
+            g_appLevels.clear();
+            SaveScenes();
+        }
+        else if (id >= ID_APP_MUTE_FIRST)
+        {
+            const int i = id - ID_APP_MUTE_FIRST;
+            g_appMixer.SetMuted(i, !g_appMixer.Entry(i).muted);
+            SaveScenes();
+        }
+        return;
+    }
+
     if (id >= ID_TARGET_MENU_FIRST)   { ShowTargetMenu(id - ID_TARGET_MENU_FIRST, screen); return; }
     if (id >= ID_TARGET_TOGGLE_FIRST) { ToggleTarget(id - ID_TARGET_TOGGLE_FIRST); return; }
     if (id >= ID_SCENE_FIRST)  { SwitchScene(id - ID_SCENE_FIRST); return; }
@@ -3420,6 +3461,11 @@ void OnClick(int id, D2D1_POINT_2F p)
     if (id >= ID_FPS_FIRST && id < ID_FPS_FIRST + 4)
     {
         if (!rec) { g_fpsChoice = id - ID_FPS_FIRST; SaveSettings(); RestartReplayIfActive(); }
+        return;
+    }
+    if (id >= ID_AUDIO_TRACKS_FIRST && id < ID_AUDIO_TRACKS_FIRST + 2)
+    {
+        if (!rec) { g_separateTracks = (id == ID_AUDIO_TRACKS_FIRST + 1); SaveSettings(); }
         return;
     }
     if (id >= ID_CONTAINER_FIRST && id < ID_CONTAINER_FIRST + 2)
@@ -3460,12 +3506,12 @@ void OnClick(int id, D2D1_POINT_2F p)
     case ID_ADD_SCENE:     AddScene(); SaveScenes(); break;
     case ID_SYSTEM_MUTE:   g_systemAudio.SetMuted(!g_systemAudio.IsMuted()); SaveSettings(); break;
     case ID_MIC_MUTE:      g_micAudio.SetMuted(!g_micAudio.IsMuted()); SaveSettings(); break;
-    case ID_TAB_SOURCES:   g_tab = 0; g_scroll = 0; break;
-    case ID_TAB_STREAM:    g_tab = 1; g_scroll = 0; break;
-    case ID_TAB_SETTINGS:  g_tab = 2; g_scroll = 0; break;
+    case ID_TAB_SOURCES:   g_tab = 0; g_scroll = 0; g_scrollMax = 0; break;
+    case ID_TAB_STREAM:    g_tab = 1; g_scroll = 0; g_scrollMax = 0; break;
+    case ID_TAB_SETTINGS:  g_tab = 2; g_scroll = 0; g_scrollMax = 0; break;
     case ID_REPLAY:        if (g_replay.IsActive()) SaveReplay(); else StartReplay(); break;
     case ID_REPLAY_STOP:   StopReplay(); break;
-    case ID_MIC_FILTERS:   ShowMicFilters(screen); break;
+    case ID_MIC_FILTERS:   ShowMicFilters(); break;
     case ID_STREAM:        ToggleStreaming(); break;
     case ID_ADD_TARGET:    AddTarget(screen); break;
     case ID_STREAM_KBPS_MINUS:
@@ -3486,14 +3532,6 @@ void OnClick(int id, D2D1_POINT_2F p)
     case ID_SYSTEM_DEVICE: ShowDeviceMenu(g_systemAudio, g_systemOn, AudioSource::Kind::System, screen); break;
     case ID_MIC_DEVICE:    ShowDeviceMenu(g_micAudio, g_micOn, AudioSource::Kind::Microphone, screen); break;
     }
-}
-
-int HitAt(D2D1_POINT_2F p)
-{
-    for (auto it = g_hits.rbegin(); it != g_hits.rend(); ++it)
-        if (Inside(it->rect, p))
-            return it->id;
-    return 0;
 }
 
 D2D1_POINT_2F ToDip(LPARAM lParam)
@@ -3523,6 +3561,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                     AddLayer(t);
             g_selectedLayer = 0;
         }
+        // أصوات البرامج: الخلّاط شغّال دايماً، وبرامج المشهد الحالي
+        g_appMixer.Start();
+        if (g_activeScene < (int)g_scenes.size())
+            g_appMixer.SetEntries(g_scenes[g_activeScene].apps);
         SetTimer(hwnd, TIMER_FRAME, 33, nullptr);
         RegisterHotKey(hwnd, HOTKEY_RECORD, MOD_NOREPEAT, VK_F9);
         RegisterHotKey(hwnd, HOTKEY_PAUSE,  MOD_NOREPEAT, VK_F10);
@@ -3536,6 +3578,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         ++g_tick;
         g_systemLevel = std::max(LevelToMeter(g_systemAudio.TakePeak()), g_systemLevel * 0.88f);
         g_micLevel    = std::max(LevelToMeter(g_micAudio.TakePeak()),    g_micLevel * 0.88f);
+        g_appLevels.resize(g_appMixer.Count(), 0.0f);
+        for (size_t i = 0; i < g_appLevels.size(); ++i)
+            g_appLevels[i] = std::max(LevelToMeter(g_appMixer.TakePeak((int)i)), g_appLevels[i] * 0.88f);
         // المعاينة: 10 مرات بالثانية (ووقت التسجيل 5 لنوفّر المعالج)
         if (g_fadeTicks > 0)            // وقت التلاشي: المعاينة كل إطار لتبيّن ناعمة
         {
@@ -3548,8 +3593,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             StartReplay(true);
         if (g_streamer.IsActive())
             g_streamStatus = g_streamer.Status();
-        if (g_tick % 60 == 0)           // كل ثانيتين: النوافذ اللي رجعت انفتحت
+        if (g_tick % 60 == 0)           // كل ثانيتين: النوافذ والبرامج اللي رجعت انفتحت
+        {
             ReconnectLostWindows();
+            g_appMixer.Reconnect();
+        }
         if (g_tick % 150 == 0 && g_drag == Drag::None)   // كل 5 ثواني منحفظ المشاهد
             SaveScenes();
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -3593,8 +3641,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_MOUSEMOVE:
     {
         g_mouse = ToDip(lParam);
+        if (g_panels.IsOpen())
+            g_panels.OnMouseMove(g_mouse);
         if (g_volDrag)
             SetVolumeFromX(*g_volDrag, g_volTrack[g_volDrag == &g_systemAudio ? 0 : 1], g_mouse.x);
+        if (g_appVolDrag >= 0)
+            g_appMixer.SetVolume(g_appVolDrag, VolumeAtX(g_appVolTrack, g_mouse.x));
         if (g_drag != Drag::None)
             UpdateDrag(g_mouse, (wParam & MK_SHIFT) != 0, (GetKeyState(VK_CONTROL) & 0x8000) != 0);
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
@@ -3610,6 +3662,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONDOWN:
     {
         const D2D1_POINT_2F p = ToDip(lParam);
+        if (g_panels.IsOpen())
+        {
+            g_panels.OnMouseDown(p);
+            if (g_panels.IsDragging())
+                SetCapture(hwnd);
+            SetFocus(hwnd);
+            return 0;
+        }
         const int hit = HitAt(p);
         if (hit == ID_SYSTEM_VOL || hit == ID_MIC_VOL)     // بلّش سحب شريط العلو
         {
@@ -3617,6 +3677,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_volDrag = index == 0 ? &g_systemAudio : &g_micAudio;
             SetVolumeFromX(*g_volDrag, g_volTrack[index], p.x);
             SetCapture(hwnd);
+            return 0;
+        }
+        if (hit >= ID_APP_VOL_FIRST && hit < ID_APP_LAST)   // شريط علو برنامج
+        {
+            const int i = hit - ID_APP_VOL_FIRST;
+            if (i < (int)g_appTracks.size())
+            {
+                g_appVolDrag  = i;
+                g_appVolTrack = g_appTracks[i];
+                g_appMixer.SetVolume(i, VolumeAtX(g_appVolTrack, p.x));
+                SetCapture(hwnd);
+            }
             return 0;
         }
         if (hit == 0)          // مش فوق زر: يمكن فوق المعاينة
@@ -3628,11 +3700,25 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_LBUTTONDBLCLK:   // دبل كليك على مشهد = إعادة تسمية
     {
         const D2D1_POINT_2F p = ToDip(lParam);
+        if (g_panels.IsOpen())       // جوّا النافذة الداخلية: متل الكبسة العادية
+        {
+            g_panels.OnMouseDown(p);
+            if (g_panels.IsDragging())
+                SetCapture(hwnd);
+            return 0;
+        }
         const int hit = HitAt(p);
-        if (hit >= ID_SCENE_FIRST)
+        if (hit >= ID_SCENE_FIRST && hit < ID_TARGET_TOGGLE_FIRST)
         {
             g_ignoreNextUp = true;
             RenameScene(hit - ID_SCENE_FIRST);
+            return 0;
+        }
+        if (hit >= ID_APP_VOL_FIRST && hit < ID_APP_LAST)  // دبل كليك على شريط برنامج = 100%
+        {
+            g_appMixer.SetVolume(hit - ID_APP_VOL_FIRST, 1.0f);
+            g_ignoreNextUp = true;
+            SaveScenes();
             return 0;
         }
         if (hit == ID_SYSTEM_VOL || hit == ID_MIC_VOL)     // دبل كليك على الشريط = رجوع لـ 100%
@@ -3654,11 +3740,25 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_ignoreNextUp = false;
             return 0;
         }
+        if (g_panels.IsOpen())
+        {
+            if (g_panels.IsDragging())
+                ReleaseCapture();
+            g_panels.OnMouseUp(ToDip(lParam));
+            return 0;
+        }
         if (g_volDrag)
         {
             g_volDrag = nullptr;
             ReleaseCapture();
             SaveSettings();
+            return 0;
+        }
+        if (g_appVolDrag >= 0)
+        {
+            g_appVolDrag = -1;
+            ReleaseCapture();
+            SaveScenes();
             return 0;
         }
         if (g_drag != Drag::None)
@@ -3677,10 +3777,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_RBUTTONUP:   // قائمة خيارات الطبقة
     {
+        if (g_panels.IsOpen())
+            return 0;
         const D2D1_POINT_2F p = ToDip(lParam);
         int id = 0;
         const int hit = HitAt(p);
-        if (hit >= ID_SCENE_FIRST)
+        if (hit >= ID_SCENE_FIRST && hit < ID_TARGET_TOGGLE_FIRST)
         {
             ShowSceneMenu(hit - ID_SCENE_FIRST, DipToScreen(p.x, p.y));
             return 0;
@@ -3697,6 +3799,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_KEYDOWN:
     {
+        if (g_panels.IsOpen())       // النافذة الداخلية بتاخد الكيبورد (Esc = إغلاق)
+        {
+            g_panels.OnKey(wParam);
+            return 0;
+        }
         const double step = (GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;
         switch (wParam)
         {
@@ -3720,8 +3827,24 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         const float s = 96.0f / g_dpi;
         const D2D1_POINT_2F mp = D2D1::Point2F(pt.x * s, pt.y * s);
         const float steps = GET_WHEEL_DELTA_WPARAM(wParam) / 120.0f;
-        // عجلة الماوس فوق شريط العلو: ±5%
-        for (int i = 0; i < 2; ++i)
+        if (g_panels.IsOpen())
+        {
+            g_panels.OnWheel(mp, steps);
+            return 0;
+        }
+        // عجلة الماوس فوق شريط العلو: ±5% (بس بتبويب المصادر، الأشرطة ما بتبيّن غير فيه)
+        for (int i = 0; g_tab == 0 && i < (int)g_appTracks.size(); ++i)
+        {
+            const D2D1_RECT_F t = g_appTracks[i];
+            if (t.left >= 0 && Inside(g_listRect, mp) && Inside(Rect(t.left - 8, t.top - 12, t.right + 8, t.bottom + 12), mp))
+            {
+                const float v = g_appMixer.Entry(i).volume;
+                g_appMixer.SetVolume(i, std::round((v + steps * 0.05f) * 20.0f) / 20.0f);
+                SaveScenes();
+                return 0;
+            }
+        }
+        for (int i = 0; g_tab == 0 && i < 2; ++i)
         {
             const D2D1_RECT_F t = g_volTrack[i];
             if (Inside(Rect(t.left - 8, t.top - 12, t.right + 8, t.bottom + 12), mp))
@@ -3733,12 +3856,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
         }
         if (Inside(g_listRect, mp))
-            g_scroll -= steps * 54.0f;
+            g_scroll = std::clamp(g_scroll - steps * 54.0f, 0.0f, g_scrollMax);
         return 0;
 
     }
 
     case WM_SETCURSOR:   // شكل الماوس حسب المكان
+        if (LOWORD(lParam) == HTCLIENT && g_panels.IsOpen())
+        {
+            SetCursor(LoadCursor(nullptr, g_panels.WantsHandCursor(g_mouse) ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        }
         if (LOWORD(lParam) == HTCLIENT)
         {
             LPCWSTR cursor = nullptr;
@@ -3800,6 +3928,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_recorder.Stop();           // إذا سكّرت وهو عم يسجّل، منحفظ الملف أول
         g_systemAudio.Stop();
         g_micAudio.Stop();
+        g_appMixer.Stop();
         PostQuitMessage(0);
         return 0;
     }

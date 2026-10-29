@@ -161,6 +161,11 @@
     <ClCompile Include="Media.cpp" />
     <ClCompile Include="AudioFilters.cpp" />
     <ClCompile Include="Replay.cpp" />
+    <ClCompile Include="Ui.cpp" />
+    <ClCompile Include="Panel.cpp" />
+    <ClCompile Include="MicFiltersPanel.cpp" />
+    <ClCompile Include="AppAudio.cpp" />
+    <ClCompile Include="AppAudioPanel.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Recorder.h" />
@@ -175,6 +180,11 @@
     <ClInclude Include="Media.h" />
     <ClInclude Include="AudioFilters.h" />
     <ClInclude Include="Replay.h" />
+    <ClInclude Include="Ui.h" />
+    <ClInclude Include="Panel.h" />
+    <ClInclude Include="MicFiltersPanel.h" />
+    <ClInclude Include="AppAudio.h" />
+    <ClInclude Include="AppAudioPanel.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="app.rc" />

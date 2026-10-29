@@ -35,8 +35,8 @@ namespace
     // منجهّز "الكاتب": ملف MP4 فيه فيديو H.264 + صوت AAC
     // ---------------------------------------------------------
     HRESULT CreateWriter(const std::wstring& path, UINT32 width, UINT32 height, UINT32 fps, UINT32 bitrate,
-                         bool withAudio, bool useHardware, bool crashSafe,
-                         IMFSinkWriter** ppWriter, DWORD* pVideo, DWORD* pAudio)
+                         int audioTracks, bool useHardware, bool crashSafe,
+                         IMFSinkWriter** ppWriter, DWORD* pVideo, std::vector<DWORD>* pAudio)
     {
         ComPtr<IMFAttributes> attributes;
         HRESULT hr = MFCreateAttributes(&attributes, 3);
@@ -74,10 +74,11 @@ namespace
         if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(vIn.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         if (SUCCEEDED(hr)) hr = writer->SetInputMediaType(video, vIn.Get(), nullptr);
 
-        // ---------- الصوت ----------
-        DWORD audio = 0;
-        if (withAudio)
+        // ---------- الصوت (مسار أو أكتر، كلهم بنفس الإعدادات) ----------
+        std::vector<DWORD> audioStreams;
+        for (int track = 0; track < audioTracks && SUCCEEDED(hr); ++track)
         {
+            DWORD audio = 0;
             ComPtr<IMFMediaType> aOut;   // AAC: 48000، ستيريو، 192 كيلوبت
             if (SUCCEEDED(hr)) hr = MFCreateMediaType(&aOut);
             if (SUCCEEDED(hr)) hr = aOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
@@ -98,6 +99,7 @@ namespace
             if (SUCCEEDED(hr)) hr = aIn->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, AudioSource::CHANNELS * 2);
             if (SUCCEEDED(hr)) hr = aIn->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AudioSource::SAMPLE_RATE * AudioSource::CHANNELS * 2);
             if (SUCCEEDED(hr)) hr = writer->SetInputMediaType(audio, aIn.Get(), nullptr);
+            audioStreams.push_back(audio);
         }
 
         if (SUCCEEDED(hr)) hr = writer->BeginWriting();
@@ -105,7 +107,7 @@ namespace
         {
             *ppWriter = writer.Detach();
             *pVideo = video;
-            *pAudio = audio;
+            *pAudio = audioStreams;
         }
         return hr;
     }
@@ -194,19 +196,22 @@ HRESULT Recorder::Start(const RecordOptions& options)
         return E_INVALIDARG;
 
     m_hasAudio      = !m_opt.audio.empty();
+    // المخلوط دايماً، ومسار لكل مصدر إذا طلبتهم (وفي أكتر من مصدر، وإلا ما في داعي)
+    const int audioTracks = !m_hasAudio ? 0
+                          : (m_opt.separateTracks && m_opt.audio.size() > 1 ? 1 + (int)m_opt.audio.size() : 1);
     m_fps           = std::clamp<UINT32>(m_opt.fps, 1, 120);
     m_frameDuration = ONE_SECOND / m_fps;
     const UINT32 bitrate = std::clamp<UINT32>(m_opt.bitrate, 500'000, 200'000'000);
 
     // حسب نوع المشفّر المختار
     const bool tryHardware = (m_opt.encoder != EncoderMode::Software);
-    HRESULT hr = CreateWriter(m_opt.path, m_width, m_height, m_fps, bitrate, m_hasAudio, tryHardware, m_opt.crashSafe,
-                              &m_writer, &m_videoStream, &m_audioStream);
+    HRESULT hr = CreateWriter(m_opt.path, m_width, m_height, m_fps, bitrate, audioTracks, tryHardware, m_opt.crashSafe,
+                              &m_writer, &m_videoStream, &m_audioStreams);
     if (FAILED(hr) && m_opt.encoder == EncoderMode::Auto)   // تلقائي: إذا كرت الشاشة ما زبط منجرّب المعالج
     {
         m_writer.Reset();
-        hr = CreateWriter(m_opt.path, m_width, m_height, m_fps, bitrate, m_hasAudio, false, m_opt.crashSafe,
-                          &m_writer, &m_videoStream, &m_audioStream);
+        hr = CreateWriter(m_opt.path, m_width, m_height, m_fps, bitrate, audioTracks, false, m_opt.crashSafe,
+                          &m_writer, &m_videoStream, &m_audioStreams);
     }
     if (FAILED(hr))
     {
@@ -332,7 +337,7 @@ HRESULT Recorder::WriteVideo(const void* pixels, LONGLONG time)
     return hr;
 }
 
-HRESULT Recorder::WriteAudio(const float* mix, size_t frames, LONGLONG time)
+HRESULT Recorder::WriteAudio(DWORD stream, const float* pcm, size_t frames, LONGLONG time)
 {
     const DWORD bytes = (DWORD)(frames * AudioSource::CHANNELS * sizeof(INT16));
     ComPtr<IMFMediaBuffer> buffer;
@@ -346,7 +351,7 @@ HRESULT Recorder::WriteAudio(const float* mix, size_t frames, LONGLONG time)
         INT16* out = (INT16*)dest;
         for (size_t i = 0; i < frames * AudioSource::CHANNELS; ++i)
         {
-            const float v = std::clamp(mix[i], -1.0f, 1.0f);
+            const float v = std::clamp(pcm[i], -1.0f, 1.0f);
             out[i] = (INT16)(v * 32767.0f);
         }
         buffer->Unlock();
@@ -361,7 +366,7 @@ HRESULT Recorder::WriteAudio(const float* mix, size_t frames, LONGLONG time)
     if (SUCCEEDED(hr))
     {
         std::lock_guard<std::mutex> lock(m_writeMutex);
-        hr = m_writer->WriteSample(m_audioStream, sample.Get());
+        hr = m_writer->WriteSample(stream, sample.Get());
     }
     return hr;
 }
@@ -449,7 +454,9 @@ void Recorder::AudioThread()
     const HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     LONGLONG written = 0;                         // كم عينة كتبنا لهلق
-    std::vector<float> mix, tmp;
+    std::vector<float> mix;
+    std::vector<std::vector<float>> each(m_opt.audio.size());    // صوت كل مصدر لحالو
+    const bool separate = m_audioStreams.size() > 1;
 
     while (m_running)
     {
@@ -463,22 +470,26 @@ void Recorder::AudioThread()
 
         const size_t frames = (size_t)std::min<LONGLONG>(target - written, AudioSource::SAMPLE_RATE);
         mix.assign(frames * AudioSource::CHANNELS, 0.0f);
-        tmp.resize(frames * AudioSource::CHANNELS);
 
         // الخلط = جمع الأصوات فوق بعض
         for (size_t s = 0; s < m_opt.audio.size(); ++s)
         {
             AudioSource* src = m_opt.audio[s];
-            const size_t got = src->Read(m_taps[s], tmp.data(), frames);
+            std::vector<float>& buf = each[s];
+            buf.assign(frames * AudioSource::CHANNELS, 0.0f);   // إذا ما وصل صوت كفاية: الباقي سكوت
+            const size_t got = src->Read(m_taps[s], buf.data(), frames);
             for (size_t i = 0; i < got * AudioSource::CHANNELS; ++i)
-                mix[i] += tmp[i];
+                mix[i] += buf[i];
 
             // إذا تجمّع صوت أكتر من اللازم (الساعات مش متطابقة 100%) منرمي القديم
             src->KeepNewest(m_taps[s], AUDIO_LAG_FRAMES * 3);
         }
 
         const LONGLONG time = written * ONE_SECOND / AudioSource::SAMPLE_RATE;
-        const HRESULT hr = WriteAudio(mix.data(), frames, time);
+        HRESULT hr = WriteAudio(m_audioStreams[0], mix.data(), frames, time);
+        // المسارات المنفصلة: كل مصدر بمساره (نفس الوقت بالضبط، فبيضلوا متزامنين)
+        for (size_t s = 0; separate && SUCCEEDED(hr) && s < each.size() && s + 1 < m_audioStreams.size(); ++s)
+            hr = WriteAudio(m_audioStreams[s + 1], each[s].data(), frames, time);
         if (FAILED(hr))
             break;
         written += frames;

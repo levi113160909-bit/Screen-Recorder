@@ -4,6 +4,10 @@
 //  في خيطين بيشتغلوا سوا:
 //   - خيط الصورة: 30 مرة بالثانية بياخد صورة وبيكتبها (H.264)
 //   - خيط الصوت : بيخلط صوت الكمبيوتر والمايك وبيكتبه (AAC)
+//
+//  مسارات الصوت المنفصلة (للمونتاج):
+//   المسار 1 = كل الأصوات مخلوطة (هاد اللي بتسمعه بأي مشغّل)
+//   وبعده مسار لكل مصدر لحالو، بنفس ترتيب RecordOptions::audio
 // =============================================================
 #pragma once
 #ifndef NOMINMAX
@@ -44,6 +48,7 @@ struct RecordOptions
     UINT32                    bitrate = 8'000'000;     // معدّل البت (بت بالثانية)
     EncoderMode               encoder = EncoderMode::Auto;
     bool                      crashSafe = true;    // MP4 مقطّع: ما بيخرب إذا البرنامج ضرب
+    bool                      separateTracks = false;   // مسار لكل مصدر صوت (بالإضافة للمخلوط)
 };
 
 class Recorder
@@ -74,7 +79,7 @@ private:
     void     AudioThread();
     LONGLONG Elapsed100ns();              // الوقت المسجّل (بدون فترات الإيقاف المؤقت)
     HRESULT  WriteVideo(const void* pixels, LONGLONG time);
-    HRESULT  WriteAudio(const float* mix, size_t frames, LONGLONG time);
+    HRESULT  WriteAudio(DWORD stream, const float* pcm, size_t frames, LONGLONG time);
 
     RecordOptions m_opt;
     std::vector<int> m_taps;              // مخازن الصوت تبعنا (وحدة لكل مصدر)
@@ -85,7 +90,8 @@ private:
 
     Microsoft::WRL::ComPtr<IMFSinkWriter> m_writer;
     std::mutex    m_writeMutex;            // ما بيكتبوا الخيطين بنفس اللحظة
-    DWORD         m_videoStream = 0, m_audioStream = 0;
+    DWORD         m_videoStream = 0;
+    std::vector<DWORD> m_audioStreams;     // [0] = المخلوط ، وبعده مسار لكل مصدر (إذا مفعّل)
     bool          m_hasAudio = false;
 
     std::atomic<bool> m_active{ false };

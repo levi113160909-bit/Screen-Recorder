@@ -64,14 +64,27 @@ void MicFilters::Process(float* stereo, size_t frames)
 {
     if (!Any())
     {
+        // ولا فلتر شغّال: بس منقيس المستوى لمقاييس نافذة الفلاتر
+        float peak = 0;
+        for (size_t i = 0; i < frames * 2; ++i)
+            peak = std::max(peak, std::fabs(stereo[i]));
+        KeepMax(m_rawPeak, peak);
+        KeepMax(m_inPeak, peak);
+        KeepMax(m_outPeak, peak);
+        m_gateOpen = true;
         m_wasOn = false;
         return;
     }
 
     // المايك عادة مونو: منشتغل على قناة وحدة ومنرجّعها للتنتين
     m_mono.resize(frames);
+    float rawPeak = 0;
     for (size_t i = 0; i < frames; ++i)
+    {
         m_mono[i] = (stereo[i * 2] + stereo[i * 2 + 1]) * 0.5f;
+        rawPeak = std::max(rawPeak, std::fabs(m_mono[i]));
+    }
+    KeepMax(m_rawPeak, rawPeak);
 
     // 1) إزالة الضجيج
     if (noise)
@@ -82,13 +95,22 @@ void MicFilters::Process(float* stereo, size_t frames)
         m_pending.clear();
     }
 
+    // المستوى اللي البوابة رح تسمعه (بعد إزالة الضجيج)
+    {
+        float peak = 0;
+        for (size_t i = 0; i < frames; ++i)
+            peak = std::max(peak, std::fabs(m_mono[i]));
+        KeepMax(m_inPeak, peak);
+    }
+
     // 2) البوابة
     if (gate)
     {
-        const float openTh = DbToLin(-42), closeTh = DbToLin(-50);
-        const float envAtt = Coef(1), envRel = Coef(60);
-        const float gAtt = 1 - Coef(4), gRel = 1 - Coef(120);
-        const int   holdSamples = (int)(RATE * 0.25f);
+        const float openDb  = std::clamp(gateOpenDb.load(), -60.0f, -10.0f);
+        const float openTh  = DbToLin(openDb), closeTh = DbToLin(openDb - 8);   // بتسكّر أوطى بشوي (ما بترجف)
+        const float envAtt  = Coef(1), envRel = Coef(60);
+        const float gAtt    = 1 - Coef(4), gRel = 1 - Coef(std::clamp(gateCloseMs.load(), 20.0f, 1000.0f));
+        const int   holdSamples = (int)(RATE * std::clamp(gateHoldMs.load(), 0.0f, 1000.0f) / 1000.0f);
         for (size_t i = 0; i < frames; ++i)
         {
             const float a = std::fabs(m_mono[i]);
@@ -100,12 +122,17 @@ void MicFilters::Process(float* stereo, size_t frames)
             m_gateGain += (target - m_gateGain) * (target > m_gateGain ? gAtt : gRel);
             m_mono[i] *= m_gateGain;
         }
+        m_gateOpen = m_gateGain > 0.5f;
     }
+    else
+        m_gateOpen = true;
 
     // 3) توحيد العلو: ضاغط (بيقرّب الواطي من العالي) + رفع + محدّد (ما بيخلّي الصوت يتشوّه)
     if (leveler)
     {
-        const float thresholdDb = -24, ratio = 3.5f, makeupDb = 10;
+        const float thresholdDb = -24;
+        const float ratio    = std::clamp(levelRatio.load(), 1.5f, 8.0f);
+        const float makeupDb = std::clamp(levelGainDb.load(), 0.0f, 20.0f);
         const float att = Coef(5), rel = Coef(200);
         for (size_t i = 0; i < frames; ++i)
         {
@@ -124,8 +151,13 @@ void MicFilters::Process(float* stereo, size_t frames)
         }
     }
 
+    float outPeak = 0;
     for (size_t i = 0; i < frames; ++i)
+    {
         stereo[i * 2] = stereo[i * 2 + 1] = m_mono[i];
+        outPeak = std::max(outPeak, std::fabs(m_mono[i]));
+    }
+    KeepMax(m_outPeak, outPeak);
     m_wasOn = true;
 }
 
@@ -165,26 +197,49 @@ void MicFilters::SpectralFrame()
     Fft(m_spec, false);
 
     const int bins = N / 2 + 1;
+    if (m_relearn.exchange(false))
+        m_frames = 0;                             // منبلّش نتعلّم الضجيج من جديد
     ++m_frames;
-    const bool learning = m_frames < 40;          // أول ربع ثانية: منتعلّم بسرعة
+
+    // القوة: 0 = خفيفة ، 1 = قوية ، 2 = قوية جداً (200%)
+    const float strength = std::clamp(noiseStrength.load(), 0.0f, 2.0f);
+    const float overSub  = 1.0f + 2.0f * strength;                 // قديش منطرح (1..5)
+    const float floorG   = DbToLin(-10.0f - 24.0f * strength);     // أقصى تخفيض (-10..-58 ديسيبل)
+    // أول نص ثانية: منتعلّم الضجيج (لازم تكون ساكت)
+    const bool learning = m_frames <= LEARN_FRAMES;
+    m_learningNow = learning;
+    if (learning)
+    {
+        // منقيس قوة الضجيج (قبل الفلتر) لحتى نبيّنها بنافذة الفلاتر
+        if (m_frames == 1) { m_learnSum = 0; m_learnCount = 0; }
+        float peak = 0;
+        for (int i = N - HOP; i < N; ++i)
+            peak = std::max(peak, std::fabs(m_frame[i]));
+        m_learnSum += peak;
+        ++m_learnCount;
+        if (m_frames == LEARN_FRAMES)
+            m_learnedDb = LinToDb(m_learnSum / m_learnCount);
+    }
 
     for (int k = 0; k < bins; ++k)
     {
         const float power = std::norm(m_spec[k]);
         m_smooth[k] = 0.75f * m_smooth[k] + 0.25f * power;
 
-        // مستوى الضجيج = أوطى شي شفناه مؤخراً (بيطلع شوي شوي، وبينزل فوراً)
+        // مستوى الضجيج = "متوسط" صوت الخلفية (مش أوطى شي).
+        // قبل كنا ناخد الأوطى، وهاد بيطلع أوطى من الضجيج الحقيقي بكتير،
+        // فالفلتر كان يفكّر إن الضجيج صوتك وما يشيله.
         if (learning)
-            m_noise[k] = m_frames == 1 ? m_smooth[k] : std::min(m_noise[k] * 1.02f, m_smooth[k]);
-        else if (m_smooth[k] < m_noise[k])
-            m_noise[k] = 0.7f * m_noise[k] + 0.3f * m_smooth[k];
+            m_noise[k] += (m_smooth[k] - m_noise[k]) / (float)m_frames;     // متوسط حقيقي
+        else if (m_smooth[k] < m_noise[k] * 3.0f)
+            m_noise[k] = 0.97f * m_noise[k] + 0.03f * m_smooth[k];         // غالباً ضجيج: منلحقه
         else
-            m_noise[k] *= 1.002f;                 // حوالي 1.6 ديسيبل بالثانية
+            m_noise[k] *= 1.0003f;                // صوتك: بالكاد منتحرّك (0.25 ديسيبل بالثانية)
 
         // كم منخلّي من هالتردد
         const float snr = m_smooth[k] / std::max(m_noise[k], 1e-12f);
-        float g = 1.0f - 2.0f / std::max(snr, 1e-6f);        // طرح مضاعف
-        g = std::clamp(g, 0.08f, 1.0f);                       // أقصى تخفيض حوالي -22 ديسيبل
+        float g = 1.0f - overSub / std::max(snr, 1e-6f);     // طرح (أقوى = منطرح أكتر)
+        g = std::clamp(g, floorG, 1.0f);                       // أقصى تخفيض حسب القوة
         // تنعيم مع الوقت (بيمنع صوت "الفقاعات")
         m_gain[k] = g > m_gain[k] ? 0.6f * g + 0.4f * m_gain[k] : 0.35f * g + 0.65f * m_gain[k];
     }
