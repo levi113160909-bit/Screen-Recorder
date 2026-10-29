@@ -66,6 +66,12 @@
     <ClCompile Include="AppAudioPanel.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="IconCache.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="AddSourcePanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Recorder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -117,6 +123,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="AppAudioPanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="IconCache.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="AddSourcePanel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Recorder.h">

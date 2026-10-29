@@ -194,6 +194,8 @@ namespace
     }
 }
 
+std::wstring AppFriendlyName(const std::wstring& exePath) { return FriendlyName(exePath); }
+
 std::vector<std::wstring> ExePathsPlayingAudio()
 {
     std::vector<std::wstring> paths;

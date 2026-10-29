@@ -166,6 +166,8 @@
     <ClCompile Include="MicFiltersPanel.cpp" />
     <ClCompile Include="AppAudio.cpp" />
     <ClCompile Include="AppAudioPanel.cpp" />
+    <ClCompile Include="IconCache.cpp" />
+    <ClCompile Include="AddSourcePanel.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Recorder.h" />
@@ -185,6 +187,8 @@
     <ClInclude Include="MicFiltersPanel.h" />
     <ClInclude Include="AppAudio.h" />
     <ClInclude Include="AppAudioPanel.h" />
+    <ClInclude Include="IconCache.h" />
+    <ClInclude Include="AddSourcePanel.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="app.rc" />

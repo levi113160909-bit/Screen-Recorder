@@ -223,7 +223,12 @@ void PanelHost::OnMouseUp(D2D1_POINT_2F p)
     {
         m_panel->OnClick(id);
         if (m_panel && m_panel->m_closeRequested)
+        {
+            std::function<void()> after = std::move(m_panel->m_afterClose);
             Close();
+            if (after)
+                after();         // بعد ما تسكّرت (ممكن يفتح نافذة جديدة)
+        }
     }
 }
 
@@ -250,6 +255,12 @@ void PanelHost::OnKey(WPARAM key)
 {
     if (key == VK_ESCAPE)
         Close();
+}
+
+void PanelHost::OnChar(wchar_t c)
+{
+    if (m_panel && c != 27)     // Esc بينعالج بـ OnKey
+        m_panel->OnChar(c);
 }
 
 bool PanelHost::WantsHandCursor(D2D1_POINT_2F p) const

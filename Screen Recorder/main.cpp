@@ -34,6 +34,7 @@
 #include "MicFiltersPanel.h"
 #include "AppAudio.h"
 #include "AppAudioPanel.h"
+#include "AddSourcePanel.h"
 #include <commdlg.h>
 #include <wincrypt.h>
 #include <wincodec.h>
@@ -1084,36 +1085,26 @@ void ShowAddAppAudioMenu(POINT)
         }));
 }
 
-void ShowAddSourceMenu(POINT screenPt)
+// نافذة "إضافة مصدر" (شوف AddSourcePanel.cpp)
+void ShowAddSourceMenu(POINT)
 {
-    const std::vector<CameraInfo>    cams    = ListCameras();
-    const std::vector<CaptureTarget> targets = ListCaptureTargets(g_hwnd);
-    std::vector<std::wstring> items;
-    for (const CameraInfo& c : cams)
-        items.push_back(L"كاميرا: " + c.name);
-    const int imageItem = (int)items.size();
-    items.push_back(L"صورة من ملف…");
-    items.push_back(L"نص…");
-    const int appItem = (int)items.size();
-    items.push_back(L"صوت برنامج…");
-    items.push_back(L"");
-    const int firstTarget = (int)items.size();
-    for (const CaptureTarget& t : targets)
-        items.push_back(t.isMonitor ? (L"شاشة كاملة: " + t.name) : (L"نافذة: " + t.name));
-
-    const int pick = ShowMenu(items, -1, screenPt);
-    if (pick < 0)
-        return;
-    if (pick < imageItem)                         // كاميرا
+    AddSourceActions a;
+    a.capture = [](const CaptureTarget& t)
+    {
+        AddLayer(t);
+        SaveScenes();
+    };
+    a.camera = [](const CameraInfo& c)
     {
         SceneLayer l;
         l.kind        = LayerKind::Camera;
-        l.source      = cams[pick].link;
-        l.target.name = cams[pick].name;
+        l.source      = c.link;
+        l.target.name = c.name;
         l.shape       = SHAPE_ROUNDED;
         AddMediaLayer(l);
-    }
-    else if (pick == imageItem)                   // صورة
+        SaveScenes();
+    };
+    a.image = []
     {
         std::wstring path;
         if (!PickImageFile(path))
@@ -1123,8 +1114,9 @@ void ShowAddSourceMenu(POINT screenPt)
         l.source      = path;
         l.target.name = FileNameOf(path);
         AddMediaLayer(l);
-    }
-    else if (pick == imageItem + 1)               // نص
+        SaveScenes();
+    };
+    a.text = []
     {
         std::wstring text = L"سأعود قريباً";
         if (!InputBox(L"النص", text, false, false, 200) || text.empty())
@@ -1135,15 +1127,10 @@ void ShowAddSourceMenu(POINT screenPt)
         l.target.name = text;
         l.background  = true;
         AddMediaLayer(l);
-    }
-    else if (pick == appItem)                     // صوت برنامج
-    {
-        ShowAddAppAudioMenu(screenPt);
-        return;
-    }
-    else if (pick >= firstTarget)
-        AddLayer(targets[pick - firstTarget]);
-    SaveScenes();
+        SaveScenes();
+    };
+    a.appAudio = [] { ShowAddAppAudioMenu({}); };
+    g_panels.Open(std::make_unique<AddSourcePanel>(g_hwnd, std::move(a)));
 }
 
 // =============================================================
@@ -3796,6 +3783,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     }
+
+    case WM_CHAR:          // كتابة بالنوافذ الداخلية (مثلاً خانة البحث)
+        if (g_panels.IsOpen())
+        {
+            g_panels.OnChar((wchar_t)wParam);
+            return 0;
+        }
+        break;
 
     case WM_KEYDOWN:
     {

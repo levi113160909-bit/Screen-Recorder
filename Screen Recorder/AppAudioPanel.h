@@ -9,8 +9,7 @@
 #pragma once
 #include "Panel.h"
 #include "AppAudio.h"
-#include <map>
-#include <wincodec.h>
+#include "IconCache.h"
 
 class AppAudioPanel : public Panel
 {
@@ -30,7 +29,6 @@ private:
     void          Refresh();                         // منجيب اللائحة من جديد
     void          UpdatePlaying();                   // بس مين عم يطلّع صوت (أخف)
     float         DrawRow(float y, float L, float R, int index);
-    ID2D1Bitmap*  AppIcon(const std::wstring& exePath);
 
     std::function<bool(const std::wstring&)> m_isAdded;
     std::function<void(const AudioApp&)>     m_add;
@@ -38,9 +36,5 @@ private:
     int  m_playingCount = 0;
     int  m_frame = 0;
 
-    // أيقونات البرامج (بتنعمل مرة وحدة لكل برنامج)
-    ComPtr<IWICImagingFactory>                     m_wic;
-    ComPtr<ID2D1RenderTarget>                      m_iconRt;     // الرسّام اللي انعملت عليه
-    std::map<std::wstring, ComPtr<ID2D1Bitmap>>    m_icons;
-    std::map<std::wstring, bool>                   m_iconTried;
+    IconCache m_icons;     // أيقونات البرامج
 };

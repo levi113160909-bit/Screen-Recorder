@@ -34,6 +34,8 @@ std::vector<AudioApp> ListAudioApps(HWND exclude);
 // مسارات البرامج اللي عم تطلّع صوت هلق (بحروف صغيرة)
 std::vector<std::wstring> ExePathsPlayingAudio();
 std::wstring LowerPath(std::wstring s);
+// اسم البرنامج الحلو (مثلاً "Google Chrome") من ملف الـ exe
+std::wstring AppFriendlyName(const std::wstring& exePath);
 
 // برنامج محفوظ بالمشهد
 struct AppAudioEntry

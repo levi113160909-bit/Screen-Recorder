@@ -2,12 +2,9 @@
 //  AppAudioPanel.cpp - نافذة "إضافة صوت برنامج"
 // =============================================================
 #include "AppAudioPanel.h"
-#include <shellapi.h>
-#include <shlobj.h>
 #include <algorithm>
 #include <cmath>
 
-#pragma comment(lib, "windowscodecs.lib")
 
 namespace
 {
@@ -26,7 +23,6 @@ namespace
 AppAudioPanel::AppAudioPanel(std::function<bool(const std::wstring&)> isAdded, std::function<void(const AudioApp&)> add)
     : m_isAdded(std::move(isAdded)), m_add(std::move(add))
 {
-    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&m_wic));
     Refresh();
 }
 
@@ -63,48 +59,6 @@ float AppAudioPanel::BodyHeight() const
 }
 
 // -------------------------------------------------------------
-//  أيقونة البرنامج الحقيقية (من ملف الـ exe)
-// -------------------------------------------------------------
-ID2D1Bitmap* AppAudioPanel::AppIcon(const std::wstring& exePath)
-{
-    if (m_iconRt.Get() != (ID2D1RenderTarget*)g_rt.Get())    // الرسّام تغيّر: منعيد الصور
-    {
-        m_iconRt = g_rt;
-        m_icons.clear();
-        m_iconTried.clear();
-    }
-    const std::wstring key = LowerPath(exePath);
-    if (m_iconTried[key])
-        return m_icons[key].Get();
-    m_iconTried[key] = true;
-    if (!m_wic || !g_rt)
-        return nullptr;
-
-    // أيقونة كبيرة (48) لحتى تبيّن حلوة على الشاشات العالية الدقة
-    HICON icon = nullptr;
-    if (FAILED(SHDefExtractIconW(exePath.c_str(), 0, 0, &icon, nullptr, MAKELONG(48, 16))) || !icon)
-    {
-        SHFILEINFOW info{};
-        if (SHGetFileInfoW(exePath.c_str(), 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON))
-            icon = info.hIcon;
-    }
-    if (!icon)
-        return nullptr;
-
-    ComPtr<IWICBitmap>          wicBmp;
-    ComPtr<IWICFormatConverter> conv;
-    ComPtr<ID2D1Bitmap>         bmp;
-    if (SUCCEEDED(m_wic->CreateBitmapFromHICON(icon, &wicBmp)) &&
-        SUCCEEDED(m_wic->CreateFormatConverter(&conv)) &&
-        SUCCEEDED(conv->Initialize(wicBmp.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone,
-                                   nullptr, 0, WICBitmapPaletteTypeMedianCut)))
-        g_rt->CreateBitmapFromWicBitmap(conv.Get(), nullptr, &bmp);
-    DestroyIcon(icon);
-    m_icons[key] = bmp;
-    return bmp.Get();
-}
-
-// -------------------------------------------------------------
 //  سطر برنامج
 // -------------------------------------------------------------
 float AppAudioPanel::DrawRow(float y, float L, float R, int i)
@@ -120,7 +74,7 @@ float AppAudioPanel::DrawRow(float y, float L, float R, int i)
 
     // الأيقونة على اليمين
     const D2D1_RECT_F ib = Rect(R - 50, y + 13, R - 18, y + 45);
-    if (ID2D1Bitmap* bmp = AppIcon(a.exePath))
+    if (ID2D1Bitmap* bmp = m_icons.FromExe(a.exePath))
         g_rt->DrawBitmap(bmp, ib, added ? 0.45f : 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     else
     {

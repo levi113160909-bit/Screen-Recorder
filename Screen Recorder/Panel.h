@@ -40,6 +40,7 @@ public:
     virtual void           DrawBody(float left, float top, float right) = 0;
     virtual void           OnClick(int /*id*/) {}
     virtual void           OnCommit() {}                          // بعد أي تغيير (منحفظ الإعدادات)
+    virtual bool           OnChar(wchar_t /*c*/) { return false; }  // كتابة (مثلاً خانة بحث)
 
 protected:
     // ---- عناصر جاهزة لكل النوافذ ----
@@ -62,6 +63,8 @@ protected:
 
     // النافذة بدها تتسكّر (مثلاً بعد ما اخترت شي). بتتسكّر بعد ما تخلص الكبسة
     void RequestClose() { m_closeRequested = true; }
+    // سكّر النافذة، وبعدها نفّذ شي (مثلاً افتح نافذة تانية أو صندوق اختيار ملف)
+    void CloseThen(std::function<void()> fn) { m_afterClose = std::move(fn); m_closeRequested = true; }
 
     // قيمة المنزلق من مكان الماوس
     static float ValueAtX(const D2D1_RECT_F& track, float x, float minV, float maxV, float step);
@@ -79,6 +82,7 @@ private:
     const SliderInfo* FindSlider(int id) const;
     int  m_activeSlider = 0;                      // المنزلق اللي عم ينسحب
     bool m_closeRequested = false;
+    std::function<void()> m_afterClose;
 };
 
 // -------------------------------------------------------------
@@ -101,6 +105,7 @@ public:
     void OnMouseUp(D2D1_POINT_2F p);
     void OnWheel(D2D1_POINT_2F p, float steps);
     void OnKey(WPARAM key);
+    void OnChar(wchar_t c);
     // شكل الماوس: true = إيد (فوق شي بينكبس)
     bool WantsHandCursor(D2D1_POINT_2F p) const;
 
