@@ -172,6 +172,9 @@
     <ClCompile Include="Overlay.cpp" />
     <ClCompile Include="Hotkeys.cpp" />
     <ClCompile Include="HotkeysPanel.cpp" />
+    <ClCompile Include="Tray.cpp" />
+    <ClCompile Include="ReplayPanel.cpp" />
+    <ClCompile Include="SettingsPanel.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Recorder.h" />
@@ -196,6 +199,9 @@
     <ClInclude Include="Overlay.h" />
     <ClInclude Include="Hotkeys.h" />
     <ClInclude Include="HotkeysPanel.h" />
+    <ClInclude Include="Tray.h" />
+    <ClInclude Include="ReplayPanel.h" />
+    <ClInclude Include="SettingsPanel.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="app.rc" />

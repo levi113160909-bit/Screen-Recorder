@@ -43,6 +43,7 @@ public:
     virtual bool           OnChar(wchar_t /*c*/) { return false; }  // كتابة (مثلاً خانة بحث)
     virtual bool           OnKeyDown(WPARAM /*vk*/) { return false; }  // كبسة زر (true = عالجتها)
     virtual bool           CapturingKeys() const { return false; }     // بدها كل الأزرار (حتى Alt و F10)
+    virtual bool           OnWheel(D2D1_POINT_2F /*p*/, float /*steps*/) { return false; }   // تمرير خاص (true = عالجته)
 
 protected:
     // ---- عناصر جاهزة لكل النوافذ ----

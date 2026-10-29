@@ -236,6 +236,8 @@ void PanelHost::OnWheel(D2D1_POINT_2F p, float steps)
 {
     if (!m_panel)
         return;
+    if (m_panel->OnWheel(p, steps))     // النافذة بتتمرّر بطريقتها (مثلاً الإعدادات: المحتوى بس)
+        return;
     // إذا المحتوى بيتمرّر: العجلة للتمرير. إذا لا: فوق المنزلق بتغيّر قيمته
     if (m_scrollMax > 0)
     {

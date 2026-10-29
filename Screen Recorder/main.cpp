@@ -38,6 +38,10 @@
 #include "Overlay.h"
 #include "Hotkeys.h"
 #include "HotkeysPanel.h"
+#include "Tray.h"
+#include "ReplayPanel.h"
+#include "SettingsPanel.h"
+#include <shobjidl.h>
 #include <commdlg.h>
 #include <wincrypt.h>
 #include <wincodec.h>
@@ -75,6 +79,16 @@ enum : int
     ID_AUDIO_TRACKS_FIRST = 180,  // خيارين (مسار صوت واحد / مسارات منفصلة)
     ID_OVERLAY_FIRST    = 190,  // 5 خيارات (مؤشر التسجيل: مخفي + 4 زوايا)
     ID_HOTKEYS          = 200,  // زر نافذة الاختصارات
+    ID_CLOSE_FIRST      = 210,  // خيارين (✕ = جنب الساعة / إغلاق)
+    ID_STARTUP_FIRST    = 220,  // خيارين (التشغيل مع ويندوز)
+    ID_REPLAY_SETTINGS  = 230,  // (قديم) صار قسم بنافذة الإعدادات
+    ID_OPEN_SETTINGS    = 240,  // زر الترس بالشريط العلوي
+    ID_TOASTS_FIRST     = 245,  // خيارين (الإشعارات): 245 ، 246
+    ID_TEST_TOAST       = 247,  // زر "تجربة"
+    ID_OVERAPP_FIRST    = 248,  // خيارين (فوق نافذة البرنامج كمان؟): 248 ، 249
+    ID_OVERAPP_SECOND   = 249,
+
+    ID_FOLDER_CHANGE, ID_FOLDER_OPEN,     // مجلد التسجيلات
     ID_LAYER_FIRST   = 1000,    // الطبقة رقم id = ID_LAYER_FIRST + id
     ID_EYE_FIRST     = 3000,
     ID_DELETE_FIRST  = 5000,
@@ -154,8 +168,11 @@ int                       g_verticalMode = 0;   // البث العمودي: 0 ق
 // الإعادة (آخر ثواني بالذاكرة)
 Streamer                      g_replay;
 std::shared_ptr<ReplayBuffer> g_replayBuffer = std::make_shared<ReplayBuffer>();
-bool                          g_replayWanted = false;      // كانت شغّالة آخر مرة؟ (منرجّع نشغّلها)
-int                           g_replayChoice = 1;
+bool                          g_replayWanted = false;      // شغّالة هلق؟ (للحفظ)
+ReplaySettings                g_replaySet;                 // إعدادات الإعادة (نافذة "إعدادات الإعادة")
+Scene                         g_replayScene;               // مشهد الإعادة لما المصدر "الشاشة كاملة"
+HMONITOR                      g_replayMonitorHandle = nullptr;
+bool                          g_systemForReplay = false;   // شغّلنا صوت النظام بس مشان الإعادة
 const int                     REPLAY_SECONDS[] = { 15, 30, 60, 120 };
 
 // الانتقال بين المشاهد
@@ -200,6 +217,17 @@ bool         g_separateTracks = false; // مسار صوت لكل مصدر (لل�
 int          g_overlayCorner  = 1;     // مؤشر التسجيل: 0 مخفي ، 1 أعلى اليمين ، 2 أعلى اليسار ، 3 أسفل اليمين ، 4 أسفل اليسار
 RecordingOverlay g_overlay;
 int          g_overlayLastCorner = 1;  // لما تخفيه بالاختصار ومنرجّعه، بيرجع لنفس الزاوية
+
+// أيقونة جنب الساعة: ✕ بيخبّي البرنامج بدل ما يسكّره
+TrayIcon     g_tray;
+bool         g_closeToTray   = true;   // ✕ = يضل شغّال جنب الساعة
+bool         g_toastsOn      = true;   // الإشعارات بزاوية الشاشة
+bool         g_overlayOverApp = true;  // المؤشر والإشعارات بيبيّنوا حتى لما نافذة البرنامج قدامك
+int          g_settingsPage  = 0;      // آخر قسم فتحته بنافذة الإعدادات
+bool         g_trayHintShown = false;  // نبّهناه مرة إنه لسا شغّال؟
+bool         g_reallyQuit    = false;  // "خروج" من القائمة (مش ✕)
+const UINT   WM_TASKBARCREATED = RegisterWindowMessageW(L"TaskbarCreated");   // شريط المهام رجع اشتغل
+constexpr UINT WM_SHOWAPP = WM_APP + 21;   // نسخة تانية من البرنامج انفتحت: منبيّن هالنسخة
 std::wstring g_encoderName;            // اسم المشفّر المختار (لبطاقة الرسومات)
 std::vector<Recorder::EncoderInfo> g_encoders;
 std::wstring g_settingsPath;
@@ -745,6 +773,8 @@ void UpdateAppIcon()
     const wchar_t* titles[] = { L"مسجّل الشاشة", L"● جارٍ التسجيل - مسجّل الشاشة",
                                 L"❚❚ متوقف مؤقتاً - مسجّل الشاشة", L"● بث مباشر - مسجّل الشاشة" };
     SetWindowTextW(g_hwnd, titles[state]);
+    g_tray.SetIcon(g_icons[icon][1]);      // أيقونة جنب الساعة كمان
+    g_tray.SetTip(titles[state]);
 }
 
 // =============================================================
@@ -1099,6 +1129,14 @@ void ShowLayerMenu(int id, POINT screenPt)
 }
 
 void ShowMessage(const std::wstring& text, bool isError);   // معرّفة تحت
+void Notify(wchar_t glyph, D2D1_COLOR_F color, const std::wstring& title, const std::wstring& sub = L"");
+
+// أيقونات الإشعارات (Segoe MDL2)
+namespace Glyph
+{
+    constexpr wchar_t Record = 0xE7C8, Check = 0xE73E, Pause = 0xE769, Play = 0xE768, Live = 0xE93E,
+                      Replay = 0xE81C, Mic = 0xE720, MicOff = 0xEC54, Scene = 0xE7F4, Warning = 0xE7BA, Stop = 0xE71A;
+}
 
 // نافذة "إضافة صوت برنامج" (شوف AppAudioPanel.cpp)
 void ShowAddAppAudioMenu(POINT)
@@ -1280,6 +1318,7 @@ void SwitchScene(int index)
     g_activeScene   = index;
     g_selectedLayer = 0;
     g_scroll        = 0;
+    Notify(Glyph::Scene, Theme::Accent, L"المشهد: " + g_scenes[index].name);
 }
 
 std::wstring NewSceneName()
@@ -1695,6 +1734,10 @@ void SaveSettings()
     put(L"CrashSafe",   g_crashSafe ? L"1" : L"0");
     put(L"SeparateTracks", g_separateTracks ? L"1" : L"0");
     put(L"OverlayCorner",  std::to_wstring(g_overlayCorner));
+    put(L"CloseToTray",    g_closeToTray ? L"1" : L"0");
+    put(L"Toasts",         g_toastsOn ? L"1" : L"0");
+    put(L"OverlayOverApp", g_overlayOverApp ? L"1" : L"0");
+    put(L"TrayHintShown",  g_trayHintShown ? L"1" : L"0");
     put(L"SystemAudio", g_systemOn ? L"1" : L"0");
     put(L"Microphone",  g_micOn ? L"1" : L"0");
     put(L"SystemDevice", g_systemAudio.DeviceId());
@@ -1706,8 +1749,18 @@ void SaveSettings()
     put(L"StreamRes",    std::to_wstring(g_streamRes));
     put(L"StreamKbps",   std::to_wstring(g_streamKbps));
     put(L"VerticalMode", std::to_wstring(g_verticalMode));
-    put(L"ReplayChoice", std::to_wstring(g_replayChoice));
+    put(L"ReplayChoice", std::to_wstring(g_replaySet.seconds));
     put(L"ReplayOn",     g_replayWanted ? L"1" : L"0");
+    put(L"ReplaySource", std::to_wstring(g_replaySet.source));
+    put(L"ReplayMonitor", std::to_wstring(g_replaySet.monitor));
+    put(L"ReplayRes",    std::to_wstring(g_replaySet.res));
+    put(L"ReplayFps",    std::to_wstring(g_replaySet.fps));
+    put(L"ReplayQuality", std::to_wstring(g_replaySet.quality));
+    put(L"ReplaySystem", g_replaySet.system ? L"1" : L"0");
+    put(L"ReplayMic",    g_replaySet.mic ? L"1" : L"0");
+    put(L"ReplayAuto",   g_replaySet.autoStart ? L"1" : L"0");
+    put(L"ReplayFolder", g_replaySet.folder);
+    put(L"RecordFolder", g_folder);
     put(L"Transition",   std::to_wstring(g_transitionChoice));
     put(L"MicNoise",     g_micAudio.Filters().noise ? L"1" : L"0");
     put(L"MicGate",      g_micAudio.Filters().gate ? L"1" : L"0");
@@ -1753,6 +1806,10 @@ void LoadSettings()
     g_crashSafe    = getInt(L"CrashSafe", 1) != 0;
     g_separateTracks = getInt(L"SeparateTracks", 0) != 0;
     g_overlayCorner  = std::clamp(getInt(L"OverlayCorner", 1), 0, 4);
+    g_closeToTray    = getInt(L"CloseToTray", 1) != 0;
+    g_toastsOn       = getInt(L"Toasts", 1) != 0;
+    g_overlayOverApp = getInt(L"OverlayOverApp", 1) != 0;
+    g_trayHintShown  = getInt(L"TrayHintShown", 0) != 0;
     g_hotkeys.Load(g_settingsPath);
     g_systemOn     = getInt(L"SystemAudio", 1) != 0;
     g_micOn        = getInt(L"Microphone", 0) != 0;
@@ -1765,8 +1822,22 @@ void LoadSettings()
     g_streamRes  = std::clamp(getInt(L"StreamRes", 1), 0, 2);
     g_streamKbps = (UINT32)std::clamp(getInt(L"StreamKbps", 6000), 1000, 20000);
     g_verticalMode     = std::clamp(getInt(L"VerticalMode", 0), 0, 1);
-    g_replayChoice     = std::clamp(getInt(L"ReplayChoice", 1), 0, 3);
-    g_replayWanted     = getInt(L"ReplayOn", 0) != 0;
+    g_replaySet.seconds  = std::clamp(getInt(L"ReplayChoice", 1), 0, 3);
+    g_replayWanted       = getInt(L"ReplayOn", 0) != 0;
+    g_replaySet.source   = std::clamp(getInt(L"ReplaySource", 0), 0, 1);
+    g_replaySet.monitor  = std::clamp(getInt(L"ReplayMonitor", 0), 0, 3);
+    g_replaySet.res      = std::clamp(getInt(L"ReplayRes", 1), 0, 2);
+    g_replaySet.fps      = std::clamp(getInt(L"ReplayFps", 1), 0, 1);
+    g_replaySet.quality  = std::clamp(getInt(L"ReplayQuality", 1), 0, 2);
+    g_replaySet.system   = getInt(L"ReplaySystem", 1) != 0;
+    g_replaySet.mic      = getInt(L"ReplayMic", 1) != 0;
+    g_replaySet.autoStart = getInt(L"ReplayAuto", g_replayWanted ? 1 : 0) != 0;   // قبل: كانت بترجع إذا كانت شغّالة
+    g_replaySet.folder   = getStr(L"ReplayFolder");
+    {
+        const std::wstring rf = getStr(L"RecordFolder");
+        if (!rf.empty())
+            g_folder = rf;
+    }
     g_transitionChoice = std::clamp(getInt(L"Transition", 1), 0, 2);
     g_micAudio.Filters().noise   = getInt(L"MicNoise", 0) != 0;
     g_micAudio.Filters().gate    = getInt(L"MicGate", 0) != 0;
@@ -1786,7 +1857,7 @@ void LoadSettings()
         mf.levelGainDb   = std::clamp(getF(L"MicLevelGainDb", MicFilters::DEF_LEVEL_GAIN_DB), 0.0f, 20.0f);
         mf.levelRatio    = std::clamp(getF(L"MicLevelRatio", MicFilters::DEF_LEVEL_RATIO * 10) / 10.0f, 1.5f, 8.0f);
     }
-    g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replayChoice]);
+    g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replaySet.seconds]);
 }
 
 // =============================================================
@@ -1898,16 +1969,128 @@ std::wstring FileNameOf(const std::wstring& path)
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
+// إشعار بزاوية الشاشة (بيبيّن لما البرنامج مش قدامك، متل وقت اللعب)
+void Notify(wchar_t glyph, D2D1_COLOR_F color, const std::wstring& title, const std::wstring& sub)
+{
+    if (g_toastsOn)
+        g_overlay.Toast(glyph, color, title, sub);
+}
+
 void ShowMessage(const std::wstring& text, bool isError)
 {
     g_message        = text;
     g_messageIsError = isError;
+    if (isError && !text.empty())        // الأخطاء كمان بتطلع إشعار (مثلاً وانت باللعبة)
+        Notify(Glyph::Warning, Theme::Red, L"حدث خطأ", text);
+}
+
+// نص الاختصار (مثلاً "F9") للإشعارات: "اضغط F9 لـ..."
+std::wstring KeyHint(int action, const std::wstring& what)
+{
+    const std::wstring k = HotkeyManager::Text(g_hotkeys.Get(action));
+    return k.empty() ? std::wstring() : L"اضغط " + LtrText(k) + L" " + what;
+}
+
+// -------------------------------------------------------------
+//  أماكن الحفظ
+// -------------------------------------------------------------
+// مجلد الإعادات: اللي اخترته، وإلا "Replays" جوّا مجلد التسجيلات
+std::wstring ReplayFolder()
+{
+    return g_replaySet.folder.empty() ? g_folder + L"\\Replays" : g_replaySet.folder;
+}
+
+// صندوق ويندوز لاختيار مجلد
+bool PickFolder(std::wstring& path, const wchar_t* title)
+{
+    ComPtr<IFileOpenDialog> dlg;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))))
+        return false;
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    dlg->SetTitle(title);
+    CreateDirectoryW(path.c_str(), nullptr);
+    ComPtr<IShellItem> start;
+    if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&start))))
+        dlg->SetFolder(start.Get());
+    if (FAILED(dlg->Show(g_hwnd)))
+        return false;                    // انلغى
+    ComPtr<IShellItem> item;
+    PWSTR chosen = nullptr;
+    if (FAILED(dlg->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &chosen)))
+        return false;
+    path = chosen;
+    CoTaskMemFree(chosen);
+    return true;
+}
+
+void OpenFolderPath(const std::wstring& folder)
+{
+    SHCreateDirectoryExW(nullptr, folder.c_str(), nullptr);
+    ShellExecuteW(nullptr, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// -------------------------------------------------------------
+//  التشغيل مع ويندوز (مفتاح Run بالريجستري، مع --tray لحتى يبدأ مخفي)
+// -------------------------------------------------------------
+const wchar_t RUN_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const wchar_t RUN_NAME[] = L"ScreenRecorder";
+
+bool IsRunAtStartup()
+{
+    wchar_t buf[1024] = {};
+    DWORD size = sizeof(buf);
+    return RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_NAME, RRF_RT_REG_SZ, nullptr, buf, &size) == ERROR_SUCCESS;
+}
+
+void SetRunAtStartup(bool on)
+{
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS)
+        return;
+    if (on)
+    {
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        const std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --tray";
+        RegSetValueExW(key, RUN_NAME, 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+    }
+    else
+        RegDeleteValueW(key, RUN_NAME);
+    RegCloseKey(key);
+}
+
+// الشاشات للإعادة (الرئيسية أول)
+std::vector<CaptureTarget> ReplayMonitors()
+{
+    std::vector<CaptureTarget> mons;
+    for (const CaptureTarget& t : ListCaptureTargets(g_hwnd))
+        if (t.isMonitor)
+            mons.push_back(t);
+    std::stable_sort(mons.begin(), mons.end(),
+                     [](const CaptureTarget& a, const CaptureTarget& b) { return a.isPrimary && !b.isPrimary; });
+    return mons;
 }
 
 void StartRecording()
 {
     if (g_recorder.IsRecording())
         return;
+    {
+        // مشهد فاضي = فيديو أسود: منبّهك بدل ما نسجّل لا شي
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        bool any = false;
+        for (const SceneLayer& l : g_scene.layers)
+            if (l.visible) { any = true; break; }
+        if (!any)
+        {
+            g_message = L"المشهد فارغ — أضف مصدرًا (مثل الشاشة كاملة) قبل التسجيل";
+            g_messageIsError = true;
+            Notify(Glyph::Warning, Theme::Yellow, L"المشهد فارغ", L"أضف مصدرًا قبل التسجيل");
+            return;
+        }
+    }
 
     CreateDirectoryW(g_folder.c_str(), nullptr);
     SYSTEMTIME st;
@@ -1938,6 +2121,7 @@ void StartRecording()
             ShowMessage(L"تعذّر استخدام " + g_encoderName + L" فاستُخدم " + g_recorder.EncoderName(), true);
         else
             ShowMessage(L"", false);
+        Notify(Glyph::Record, Theme::Red, L"بدأ التسجيل", KeyHint(HK_RECORD, L"للإيقاف"));
     }
     else
     {
@@ -1951,7 +2135,10 @@ void StartRecording()
 void FinishRecording(HRESULT hr)
 {
     if (SUCCEEDED(hr))
+    {
         ShowMessage(L"✓ تم الحفظ: " + FileNameOf(g_lastFile), false);
+        Notify(Glyph::Check, Theme::Green, L"تم حفظ التسجيل", FileNameOf(g_lastFile));
+    }
     else
     {
         wchar_t msg[128];
@@ -1977,7 +2164,13 @@ void ToggleRecording()
 void TogglePause()
 {
     if (g_recorder.IsRecording())
+    {
         g_recorder.SetPaused(!g_recorder.IsPaused());
+        if (g_recorder.IsPaused())
+            Notify(Glyph::Pause, Theme::Yellow, L"توقّف التسجيل مؤقتًا", KeyHint(HK_PAUSE, L"للاستئناف"));
+        else
+            Notify(Glyph::Play, Theme::Red, L"استُؤنف التسجيل");
+    }
     UpdateAppIcon();
 }
 
@@ -2357,8 +2550,10 @@ void StartStreaming()
     if (g_streamer.Start(opt, error))
     {
         g_streamStatus.clear();
-        ShowMessage(opt.targets.size() == 1 ? L"بدأ البث إلى " + opt.targets[0].name
-                                            : L"بدأ البث إلى " + std::to_wstring(opt.targets.size()) + L" منصات", false);
+        const std::wstring to = opt.targets.size() == 1 ? L"إلى " + opt.targets[0].name
+                                                        : L"إلى " + std::to_wstring(opt.targets.size()) + L" منصات";
+        ShowMessage(L"بدأ البث " + to, false);
+        Notify(Glyph::Live, Theme::Red, L"بدأ البث المباشر", to);
     }
     else
     {
@@ -2377,6 +2572,8 @@ void StopStreaming(const std::wstring& message = L"انتهى البث")
     g_liveTargets.clear();
     g_streamStatus.clear();
     ShowMessage(message, false);
+    if (!message.empty())
+        Notify(Glyph::Live, Theme::SubText, message);
     UpdateAppIcon();
 }
 
@@ -2412,30 +2609,66 @@ void StartReplay(bool quiet = false)
         return;
 
     StreamOptions opt;
-    opt.scene    = &g_scene;
     opt.notify   = g_hwnd;
     opt.isReplay = true;
     opt.replay   = g_replayBuffer;
     g_replayBuffer->Clear();
-    g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replayChoice]);
+    g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replaySet.seconds]);
 
-    // نفس جودة التسجيل (لحد 1080p لحتى ما تاكل الذاكرة)
-    int cw, ch;
+    // ---- الصورة: الشاشة كاملة (الافتراضي) أو المشهد الحالي ----
+    int cw = 0, ch = 0;
+    g_replayMonitorHandle = nullptr;
+    if (g_replaySet.source == 0)
+    {
+        const std::vector<CaptureTarget> mons = ReplayMonitors();
+        if (!mons.empty())
+        {
+            const CaptureTarget& t = mons[std::clamp(g_replaySet.monitor, 0, (int)mons.size() - 1)];
+            cw = (t.rect.right - t.rect.left) & ~1;
+            ch = (t.rect.bottom - t.rect.top) & ~1;
+            std::lock_guard<std::mutex> lock(g_replayScene.mutex);
+            g_replayScene.canvasW = cw;
+            g_replayScene.canvasH = ch;
+            g_replayScene.layers.clear();
+            SceneLayer l;
+            l.id = 1;
+            l.target = t;
+            l.x = 0; l.y = 0; l.w = cw; l.h = ch;
+            g_replayScene.layers.push_back(l);
+            opt.scene = &g_replayScene;
+            g_replayMonitorHandle = MonitorFromRect(&t.rect, MONITOR_DEFAULTTOPRIMARY);
+        }
+    }
+    if (!opt.scene)                      // المشهد الحالي (أو ما لقينا شاشة)
     {
         std::lock_guard<std::mutex> lock(g_scene.mutex);
         cw = g_scene.canvasW;
         ch = g_scene.canvasH;
+        opt.scene = &g_scene;
     }
-    UINT32 w = (UINT32)cw, h = (UINT32)ch;
-    if (h > 1080) { w = (UINT32)((double)cw * 1080 / ch); h = 1080; }
-    opt.width     = w & ~1u;
-    opt.height    = h & ~1u;
-    opt.fps       = std::min<UINT32>(CurrentFps(), 60);
-    opt.videoKbps = std::clamp<UINT32>(CurrentBitrate() / 1000, 2000, 40000);
+
+    // ---- الدقة والإطارات والجودة ----
+    UINT32 h = g_replaySet.res == 1 ? 1080 : (g_replaySet.res == 2 ? 720 : (UINT32)ch);
+    h = std::min<UINT32>(h, (UINT32)ch);
+    UINT32 w = (UINT32)((double)cw * h / std::max(1, ch));
+    opt.width     = std::max<UINT32>(16, w & ~1u);
+    opt.height    = std::max<UINT32>(16, h & ~1u);
+    opt.fps       = g_replaySet.fps == 0 ? 30 : 60;
+    opt.videoKbps = ReplayKbps(g_replaySet, (int)opt.width, (int)opt.height);
     opt.encoder   = (EncoderMode)g_encoderMode;
-    if (g_systemOn && g_systemAudio.IsRunning()) opt.audio.push_back(&g_systemAudio);
-    if (g_micOn && g_micAudio.IsRunning())       opt.audio.push_back(&g_micAudio);
-    if (AnySceneHasApps())                       opt.audio.push_back(&g_appMixer.Output());
+
+    // ---- الصوت ----
+    if (g_replaySet.system)
+    {
+        if (!g_systemAudio.IsRunning() && g_systemAudio.Start())
+            g_systemForReplay = !g_systemOn;          // شغّلناه بس مشان الإعادة
+        if (g_systemAudio.IsRunning())
+            opt.audio.push_back(&g_systemAudio);
+    }
+    if (g_replaySet.mic && g_micOn && g_micAudio.IsRunning())
+        opt.audio.push_back(&g_micAudio);
+    if (g_replaySet.source == 1 && AnySceneHasApps())
+        opt.audio.push_back(&g_appMixer.Output());
 
     std::wstring error;
     if (!g_replay.Start(opt, error))
@@ -2446,11 +2679,11 @@ void StartReplay(bool quiet = false)
     g_replayWanted = true;
     SaveSettings();
     if (!quiet)
-        {
-            const std::wstring k = HotkeyManager::Text(g_hotkeys.Get(HK_REPLAY_SAVE));
-            ShowMessage(L"الإعادة تعمل — " + (k.empty() ? std::wstring(L"احفظ") : L"اضغط " + LtrText(k) + L" لحفظ") +
-                        L" آخر " + std::to_wstring(REPLAY_SECONDS[g_replayChoice]) + L" ثانية", false);
-        }
+    {
+        const std::wstring hint = KeyHint(HK_REPLAY_SAVE, L"لحفظ آخر " + std::to_wstring(REPLAY_SECONDS[g_replaySet.seconds]) + L" ثانية");
+        ShowMessage(L"الإعادة تعمل" + (hint.empty() ? std::wstring() : L" — " + hint), false);
+        Notify(Glyph::Replay, Theme::Accent, L"الإعادة تعمل", hint);
+    }
 }
 
 void StopReplay()
@@ -2460,8 +2693,12 @@ void StopReplay()
     g_replay.Stop();
     g_replayBuffer->Clear();
     g_replayWanted = false;
+    if (g_systemForReplay && !g_systemOn)      // صوت النظام كان شغّال بس مشان الإعادة
+        g_systemAudio.Stop();
+    g_systemForReplay = false;
     SaveSettings();
     ShowMessage(L"أُوقفت الإعادة", false);
+    Notify(Glyph::Replay, Theme::SubText, L"أُوقفت الإعادة");
 }
 
 void SaveReplay()
@@ -2471,13 +2708,14 @@ void SaveReplay()
         ShowMessage(L"شغّل الإعادة أولاً (زر «الإعادة» في الأسفل)", true);
         return;
     }
-    CreateDirectoryW(g_folder.c_str(), nullptr);
+    const std::wstring folder = ReplayFolder();
+    SHCreateDirectoryExW(nullptr, folder.c_str(), nullptr);
     SYSTEMTIME st;
     GetLocalTime(&st);
     wchar_t name[64];
     swprintf_s(name, L"Replay_%04d-%02d-%02d_%02d-%02d-%02d.mp4",
                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    const std::wstring path = g_folder + L"\\" + name;
+    const std::wstring path = folder + L"\\" + name;
 
     std::wstring error;
     if (g_replayBuffer->Save(path, error))
@@ -2485,6 +2723,7 @@ void SaveReplay()
         g_lastFile = path;
         g_replaySavedTick = g_tick;          // المؤشر بيبيّن "حُفظ" ثانيتين
         ShowMessage(L"✓ حُفظت الإعادة: " + std::wstring(name), false);
+        Notify(Glyph::Check, Theme::Green, L"حُفظت الإعادة", L"آخر " + std::to_wstring(REPLAY_SECONDS[g_replaySet.seconds]) + L" ثانية • " + name);
     }
     else
         ShowMessage(L"تعذّر حفظ الإعادة: " + error, true);
@@ -2540,6 +2779,17 @@ void DrawTopBar(float W)
     Circle(W - 36, 34, 14, Theme::Red);
     Circle(W - 36, 34, 5, Theme::White);
     Text(L"مسجّل الشاشة", g_fTitle.Get(), Rect(W - 330, 10, W - 60, 58), Theme::Text);
+
+    // زر الإعدادات (ترس) جنب العنوان
+    {
+        const float tw = TextWidth(L"مسجّل الشاشة", g_fTitle.Get());
+        const D2D1_RECT_F gear = Rect(W - 60 - tw - 140, 16, W - 60 - tw - 16, 52);
+        const bool hover = AddHit(gear, ID_OPEN_SETTINGS);
+        Fill(gear, hover ? Theme::Hover : Theme::Panel, 10);
+        Stroke(gear, Theme::Border, 10);
+        Text(Icon::Settings, g_fIcon.Get(), Rect(gear.right - 34, gear.top, gear.right - 10, gear.bottom), hover ? Theme::Text : Theme::SubText);
+        Text(L"الإعدادات", g_fSegment.Get(), Rect(gear.left + 8, gear.top, gear.right - 36, gear.bottom), hover ? Theme::Text : Theme::SubText);
+    }
 
     const bool rec    = g_recorder.IsRecording();
     const bool paused = g_recorder.IsPaused();
@@ -2978,135 +3228,179 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
                  g_micAudio, g_micOn, g_micLevel, ID_MIC, ID_MIC_DEVICE, ID_MIC_MUTE, ID_MIC_VOL, 1);
 }
 
-// ---------- تبويب الإعدادات ----------
-void DrawSettingsTab(const D2D1_RECT_F& side, float y)
+// ---------- صفحات نافذة الإعدادات (الفيديو، التسجيل، المؤشر، عام) ----------
+// الأرقام + SETTINGS_ID_OFFSET لحتى توصل الكبسة للنافذة، وهي بترجّعها لـ OnClick
+float DrawSettingsPage(int page, float L, float top, float R)
 {
+    const int   O = SETTINGS_ID_OFFSET;
     const bool  locked = Busy();
-    const float L = side.left + 16, R = side.right - 16;
+    float y = top;
 
-    // التبويب بيتمرّر بعجلة الماوس إذا ما كفّت المساحة
-    const float top = y;
-    g_listRect = Rect(side.left + 4, top, side.right - 4, side.bottom - 6);
-    g_rt->PushAxisAlignedClip(g_listRect, D2D1_ANTIALIAS_MODE_ALIASED);
-    g_hitClipOn = true;
-    g_hitClip   = g_listRect;
-    g_scroll = std::clamp(g_scroll, 0.0f, g_scrollMax);   // قبل الرسم، لحتى ما ينزل أبعد من النهاية
-    y -= g_scroll;
-
-    auto Label = [&](const wchar_t* s) { Text(s, g_fSection.Get(), Rect(L, y, R, y + 22), Theme::SubText); y += 24; };
-    auto Hint  = [&](const std::wstring& s) { Text(s, g_fSmall.Get(), Rect(L, y, R, y + 18), Theme::SubText); y += 24; };
-
-    // اختصارات لوحة المفاتيح (بتشتغل حتى وقت التسجيل)
-    DrawButton(Rect(L, y, R, y + 38), L"اختصارات لوحة المفاتيح", ID_HOTKEYS, false, true, Icon::Keyboard);
-    y += 50;
-
-    // 1) دقة الفيديو (حجم اللوحة)
-    int pw, ph;
-    PrimaryMonitorSize(pw, ph);
-    Label(L"دقة الفيديو");
-    DrawSegmented(Rect(L, y, R, y + 34), { L"الشاشة", L"1440p", L"1080p", L"720p" }, g_canvasChoice, ID_CANVAS_FIRST, !locked);
-    y += 38;
-    Hint(g_canvasChoice == 0 ? L"بحجم الشاشة الرئيسية ← " + SizeText(pw & ~1, ph & ~1)
-                             : SizeText(CANVAS_H[g_canvasChoice] * 16 / 9, CANVAS_H[g_canvasChoice]));
-
-    // 2) معدّل الإطارات
-    Label(L"معدّل الإطارات");
-    DrawSegmented(Rect(L, y, R, y + 34), { L"تلقائي", L"24", L"30", L"60" }, g_fpsChoice, ID_FPS_FIRST, !locked);
-    y += 38;
-    Hint(g_fpsChoice == 0 ? L"تلقائي: حسب تردد الشاشة ← " + std::to_wstring(CurrentFps()) + L" إطار/ث"
-                          : std::wstring(L"عدد ثابت من الإطارات في الثانية"));
-
-    // 3) الجودة
-    Label(L"الجودة");
-    DrawSegmented(Rect(L, y, R, y + 34), { L"منخفضة", L"متوسطة", L"عالية", L"مخصّصة" }, g_quality, ID_QUALITY_FIRST, !locked);
-    y += 44;
-
-    // 4) معدّل البت:  [+]  12 ميغابت/ث  [−]
-    Label(L"معدّل البت");
-    const D2D1_RECT_F box   = Rect(L, y, R, y + 34);
-    const D2D1_RECT_F plus  = Rect(R - 40, y + 3, R - 3, y + 31);
-    const D2D1_RECT_F minus = Rect(L + 3, y + 3, L + 40, y + 31);
-    Fill(box, Theme::Card, 9);
-    if (AddHit(plus, ID_BITRATE_PLUS) && !locked)   Fill(plus, Theme::Hover, 7);
-    if (AddHit(minus, ID_BITRATE_MINUS) && !locked) Fill(minus, Theme::Hover, 7);
-    Text(L"+", g_fCenter.Get(), plus,  locked ? Theme::Off : Theme::Text);
-    Text(L"−", g_fCenter.Get(), minus, locked ? Theme::Off : Theme::Text);
-    Text(MbpsText(CurrentBitrate()) + L" ميغابت/ث", g_fCenter.Get(), Rect(L + 44, y, R - 44, y + 34), Theme::Text);
-    y += 44;
-
-    // 5) المشفّر (قائمة منسدلة)
-    Label(L"المشفّر");
-    const D2D1_RECT_F enc = Rect(L, y, R, y + 34);
-    Fill(enc, AddHit(enc, ID_ENCODER_MENU) && !locked ? Theme::Hover : Theme::Card, 9);
-    Text(EncoderLabel(), g_fBody.Get(), Rect(L + 34, y, R - 12, y + 34), locked ? Theme::SubText : Theme::Text);
-    Text(Icon::Chevron, g_fIcon.Get(), Rect(L + 4, y, L + 30, y + 34), Theme::SubText);
-    y += 44;
-
-    // 6) صيغة الحفظ
-    Label(L"صيغة الحفظ");
-    DrawSegmented(Rect(L, y, R, y + 34), { L"MP4 آمن", L"MP4 عادي" }, g_crashSafe ? 0 : 1, ID_CONTAINER_FIRST, !locked);
-    y += 38;
-    Hint(g_crashSafe ? std::wstring(L"لا يضيع التسجيل إذا تعطّل البرنامج أو انقطعت الكهرباء")
-                     : std::wstring(L"يضيع التسجيل كله إذا تعطّل البرنامج قبل الإيقاف"));
-
-    // 6.5) مسارات الصوت
-    Label(L"مسارات الصوت");
-    DrawSegmented(Rect(L, y, R, y + 34), { L"مسار واحد", L"مسارات منفصلة" }, g_separateTracks ? 1 : 0, ID_AUDIO_TRACKS_FIRST, !locked);
-    y += 38;
-    if (g_separateTracks)
+    auto Label = [&](const std::wstring& s) { Text(s, g_fSection.Get(), Rect(L + 16, y, R - 16, y + 22), Theme::Text); y += 26; };
+    auto Hint  = [&](const std::wstring& s, D2D1_COLOR_F c = Theme::SubText)
     {
-        Hint(L"المسار 1: الكل، ثم النظام، الميكروفون، البرامج");
-        Hint(L"مفيد للمونتاج: تعدّل كل صوت وحده");
-    }
-    else
-        Hint(L"كل الأصوات مدمجة في مسار واحد");
-
-    // مؤشر التسجيل على الشاشة (بيشتغل حتى وقت التسجيل)
-    Label(L"مؤشر التسجيل على الشاشة");
-    DrawSegmented(Rect(L, y, R, y + 34), { L"مخفي", L"\u25E5", L"\u25E4", L"\u25E2", L"\u25E3" },
-                  g_overlayCorner, ID_OVERLAY_FIRST, true);
-    y += 38;
+        Text(s, g_fSmall.Get(), Rect(L + 16, y, R - 16, y + 18), c);
+        y += 22;
+    };
+    const float l = L + 16, r = R - 16;
+    auto Locked = [&]()
     {
-        static const wchar_t* where[] = { L"لا يظهر أي مؤشر", L"أعلى يمين الشاشة", L"أعلى يسار الشاشة",
-                                          L"أسفل يمين الشاشة", L"أسفل يسار الشاشة" };
-        Hint(std::wstring(where[g_overlayCorner]) + (g_overlayCorner ? L" • لا يظهر في التسجيل" : L""));
+        if (!locked)
+            return;
+        Fill(Rect(L, y, R, y + 40), WithAlpha(Theme::Yellow, 0.12f), 10);
+        Text(L"لا يمكن تغيير هذه الإعدادات أثناء التسجيل أو البث", g_fBody.Get(), Rect(L + 16, y, R - 16, y + 40), Theme::Yellow);
+        y += 50;
+    };
+
+    // كل خيار بكرت لحالو: عنوان، أزرار، شرح
+    auto Option = [&](const std::wstring& title, auto&& controls)
+    {
+        const float start = y;
+        y += 12;
+        Label(title);
+        controls();
+        y += 6;
+        // إطار حول الخيار
+        Stroke(Rect(L + 0.5f, start + 0.5f, R - 0.5f, y - 0.5f), Theme::Border, 12);
+        y += 10;
+    };
+
+    switch (page)
+    {
+    case SP_VIDEO:
+    {
+        Locked();
+        int pw, ph;
+        PrimaryMonitorSize(pw, ph);
+        Option(L"دقة الفيديو", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"الشاشة", L"1440p", L"1080p", L"720p" }, g_canvasChoice, O + ID_CANVAS_FIRST, !locked);
+            y += 40;
+            Hint(g_canvasChoice == 0 ? L"بحجم الشاشة الرئيسية ← " + SizeText(pw & ~1, ph & ~1)
+                                     : SizeText(CANVAS_H[g_canvasChoice] * 16 / 9, CANVAS_H[g_canvasChoice]));
+        });
+        Option(L"معدّل الإطارات", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"تلقائي", L"24", L"30", L"60" }, g_fpsChoice, O + ID_FPS_FIRST, !locked);
+            y += 40;
+            Hint(g_fpsChoice == 0 ? L"تلقائي: حسب تردد الشاشة ← " + std::to_wstring(CurrentFps()) + L" إطار/ث"
+                                  : std::wstring(L"عدد ثابت من الإطارات في الثانية"));
+        });
+        Option(L"الجودة ومعدّل البت", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"منخفضة", L"متوسطة", L"عالية", L"مخصّصة" }, g_quality, O + ID_QUALITY_FIRST, !locked);
+            y += 42;
+            const D2D1_RECT_F box   = Rect(l, y, r, y + 34);
+            const D2D1_RECT_F plus  = Rect(r - 40, y + 3, r - 3, y + 31);
+            const D2D1_RECT_F minus = Rect(l + 3, y + 3, l + 40, y + 31);
+            Fill(box, Theme::Background, 9);
+            if (AddHit(plus, O + ID_BITRATE_PLUS) && !locked)   Fill(plus, Theme::Hover, 7);
+            if (AddHit(minus, O + ID_BITRATE_MINUS) && !locked) Fill(minus, Theme::Hover, 7);
+            Text(L"+", g_fCenter.Get(), plus,  locked ? Theme::Off : Theme::Text);
+            Text(L"−", g_fCenter.Get(), minus, locked ? Theme::Off : Theme::Text);
+            Text(MbpsText(CurrentBitrate()) + L" ميغابت/ث", g_fCenter.Get(), Rect(l + 44, y, r - 44, y + 34), Theme::Text);
+            y += 40;
+            Hint(L"الأعلى = صورة أوضح وملف أكبر");
+        });
+        Option(L"المشفّر", [&]
+        {
+            const D2D1_RECT_F enc = Rect(l, y, r, y + 34);
+            Fill(enc, AddHit(enc, O + ID_ENCODER_MENU) && !locked ? Theme::Hover : Theme::Background, 9);
+            Text(EncoderLabel(), g_fBody.Get(), Rect(l + 34, y, r - 12, y + 34), locked ? Theme::SubText : Theme::Text);
+            Text(Icon::Chevron, g_fIcon.Get(), Rect(l + 4, y, l + 30, y + 34), Theme::SubText);
+            y += 40;
+            const bool gpu = g_previewCompositor.UsingGpu();
+            Hint(gpu ? L"محرّك التصوير: بطاقة الرسومات (Windows Graphics Capture)"
+                     : L"محرّك التصوير: الطريقة القديمة (GDI) — بطاقة الرسومات غير متاحة",
+                 gpu ? Theme::Green : Theme::Yellow);
+        });
+        break;
     }
 
-    // 7) الانتقال بين المشاهد (بيشتغل حتى وقت التسجيل)
-    Label(L"الانتقال بين المشاهد");
-    DrawSegmented(Rect(L, y, R, y + 34), { L"فوري", L"تلاشٍ سريع", L"تلاشٍ ناعم" }, g_transitionChoice, ID_TRANSITION_FIRST, true);
-    y += 44;
-
-    // 8) مدة الإعادة
-    Label(L"مدة الإعادة (حفظ آخر لحظات)");
-    DrawSegmented(Rect(L, y, R, y + 34), { L"15 ث", L"30 ث", L"60 ث", L"دقيقتان" }, g_replayChoice, ID_REPLAY_SEC_FIRST, true);
-    y += 38;
+    case SP_RECORDING:
     {
-        const std::wstring k = HotkeyManager::Text(g_hotkeys.Get(HK_REPLAY_SAVE));
-        Hint(L"شغّل الإعادة من الشريط السفلي، " + (k.empty() ? std::wstring(L"واحفظ") : L"واضغط " + LtrText(k) + L" لحفظ") +
-             L" آخر " + std::to_wstring(REPLAY_SECONDS[g_replayChoice]) + L" ثانية");
+        Locked();
+        Option(L"مكان حفظ التسجيلات", [&]
+        {
+            const D2D1_RECT_F box = Rect(l, y, r, y + 34);
+            Fill(box, Theme::Background, 9);
+            Text(LtrText(g_folder), g_fSmallEnd.Get(), Rect(l + 10, y, r - 10, y + 34), Theme::Text);
+            y += 42;
+            DrawButton(Rect(r - 130, y, r, y + 32), L"تغيير…", O + ID_FOLDER_CHANGE, false, !locked, Icon::Folder);
+            DrawButton(Rect(r - 270, y, r - 140, y + 32), L"فتح المجلد", O + ID_FOLDER_OPEN, false, true);
+            y += 40;
+        });
+        Option(L"صيغة الملف", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"MP4 آمن", L"MP4 عادي" }, g_crashSafe ? 0 : 1, O + ID_CONTAINER_FIRST, !locked);
+            y += 40;
+            Hint(g_crashSafe ? std::wstring(L"لا يضيع التسجيل إذا تعطّل البرنامج أو انقطعت الكهرباء")
+                             : std::wstring(L"يضيع التسجيل كله إذا تعطّل البرنامج قبل الإيقاف"));
+        });
+        Option(L"مسارات الصوت", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"مسار واحد", L"مسارات منفصلة" }, g_separateTracks ? 1 : 0, O + ID_AUDIO_TRACKS_FIRST, !locked);
+            y += 40;
+            Hint(g_separateTracks ? std::wstring(L"المسار 1: الكل، ثم النظام، الميكروفون، البرامج — مفيد للمونتاج")
+                                  : std::wstring(L"كل الأصوات مدمجة في مسار واحد"));
+        });
+        break;
     }
 
-    // محرّك التصوير المستعمل
-    const bool gpu = g_previewCompositor.UsingGpu();
-    Text(gpu ? L"محرّك التصوير: بطاقة الرسومات (Windows Graphics Capture)"
-             : L"محرّك التصوير: الطريقة القديمة (GDI) — بطاقة الرسومات غير متاحة",
-         g_fSmall.Get(), Rect(L, y, R, y + 18), gpu ? Theme::Green : Theme::Yellow);
-    y += 24;
+    case SP_OVERLAY:
+    {
+        Option(L"مؤشر التسجيل", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"مخفي", L"◥", L"◤", L"◢", L"◣" },
+                          g_overlayCorner, O + ID_OVERLAY_FIRST, true);
+            y += 40;
+            static const wchar_t* where[] = { L"لا يظهر أي مؤشر", L"أعلى يمين الشاشة", L"أعلى يسار الشاشة",
+                                              L"أسفل يمين الشاشة", L"أسفل يسار الشاشة" };
+            Hint(std::wstring(where[g_overlayCorner]) + (g_overlayCorner ? L" • الوقت، المايك، الإعادة" : L""));
+        });
+        Option(L"الإشعارات", [&]
+        {
+            DrawSegmented(Rect(l + 140, y, r, y + 34), { L"تظهر", L"لا تظهر" }, g_toastsOn ? 0 : 1, O + ID_TOASTS_FIRST, true);
+            DrawButton(Rect(l, y, l + 130, y + 34), L"تجربة", O + ID_TEST_TOAST, false, g_toastsOn);
+            y += 40;
+            Hint(L"بدء التسجيل وحفظه، الإعادة، البث، المايك... في زاوية المؤشر");
+        });
+        Option(L"عندما تكون نافذة البرنامج أمامك", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"تظهر دائمًا", L"تختفي" }, g_overlayOverApp ? 0 : 1, O + ID_OVERAPP_FIRST, true);
+            y += 40;
+            Hint(g_overlayOverApp ? std::wstring(L"تظهر في كل الحالات: سطح المكتب، الألعاب، وفوق البرنامج")
+                                  : std::wstring(L"تظهر فقط عندما يكون البرنامج مصغّرًا أو خلف نافذة أخرى"));
+        });
+        Hint(L"المؤشر والإشعارات لا يظهران في التسجيل ولا في البث", Theme::Green);
+        break;
+    }
 
-    if (locked)
-        Text(L"لا يمكن تغيير الإعدادات أثناء التسجيل أو البث", g_fSmall.Get(), Rect(L, y, R, y + 18), Theme::Yellow);
-    y += 24;
-
-    // حدود التمرير
-    const float contentH = y + g_scroll - top;
-    const float viewH    = g_listRect.bottom - g_listRect.top;
-    g_scrollMax = std::max(0.0f, contentH - viewH);
-    g_scroll = std::clamp(g_scroll, 0.0f, g_scrollMax);
-    g_hitClipOn = false;
-    g_rt->PopAxisAlignedClip();
+    case SP_GENERAL:
+    {
+        Option(L"عند الضغط على ✕", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"بجانب الساعة", L"إغلاق البرنامج" }, g_closeToTray ? 0 : 1, O + ID_CLOSE_FIRST, true);
+            y += 40;
+            Hint(g_closeToTray ? std::wstring(L"يبقى البرنامج يعمل، والخروج من أيقونته بجانب الساعة")
+                               : std::wstring(L"يُغلق البرنامج تمامًا"));
+        });
+        Option(L"التشغيل مع بدء ويندوز", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"لا", L"نعم، بجانب الساعة" }, IsRunAtStartup() ? 1 : 0, O + ID_STARTUP_FIRST, true);
+            y += 40;
+            Hint(L"يبدأ مخفيًّا بجانب الساعة، جاهزًا للاختصارات والإعادة");
+        });
+        Option(L"الانتقال بين المشاهد", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"فوري", L"تلاشٍ سريع", L"تلاشٍ ناعم" }, g_transitionChoice, O + ID_TRANSITION_FIRST, true);
+            y += 40;
+        });
+        break;
+    }
+    }
+    return y - top;
 }
-
 
 // ---------- تبويب البث: الوجهات + إعدادات البث ----------
 void DrawStreamTab(const D2D1_RECT_F& side, float y)
@@ -3240,10 +3534,9 @@ void DrawSidebar(const D2D1_RECT_F& side)
 {
     Fill(side, Theme::Panel, 14);
     DrawSegmented(Rect(side.left + 12, side.top + 12, side.right - 12, side.top + 46),
-                  { L"المصادر", L"البث", L"الإعدادات" }, g_tab, ID_TAB_SOURCES, true);
-    if (g_tab == 0)      DrawSourcesTab(side, side.top + 58);
-    else if (g_tab == 1) DrawStreamTab(side, side.top + 58);
-    else                 DrawSettingsTab(side, side.top + 58);
+                  { L"المصادر", L"البث" }, g_tab, ID_TAB_SOURCES, true);
+    if (g_tab == 1) DrawStreamTab(side, side.top + 58);
+    else            DrawSourcesTab(side, side.top + 58);
 }
 
 // ---------- الشريط السفلي ----------
@@ -3608,6 +3901,160 @@ void NudgeSelected(double dx, double dy)
 // =============================================================
 //  الأحداث
 // =============================================================
+// =============================================================
+//  أيقونة جنب الساعة
+// =============================================================
+void ShowFromTray()
+{
+    ShowWindow(g_hwnd, IsIconic(g_hwnd) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(g_hwnd);
+}
+
+void HideToTray()
+{
+    g_panels.Close();
+    ShowWindow(g_hwnd, SW_HIDE);
+    if (!g_trayHintShown)       // أول مرة بس: منخبّره وين صار
+    {
+        g_tray.Balloon(L"مسجّل الشاشة ما زال يعمل",
+                       L"البرنامج هنا بجانب الساعة. اضغط على أيقونته لفتحه، أو بالزر الأيمن للخروج.");
+        g_trayHintShown = true;
+        SaveSettings();
+    }
+}
+
+void QuitApp()
+{
+    g_reallyQuit = true;
+    DestroyWindow(g_hwnd);       // إذا عم يسجّل بينحفظ الملف أول (WM_DESTROY)
+}
+
+void OpenSettings(int page);   // تحت
+
+void ShowTrayMenu(POINT pt)
+{
+    const bool rec = g_recorder.IsRecording(), live = g_streamer.IsActive(), replay = g_replay.IsActive();
+    std::vector<std::wstring> items;
+    std::vector<int> codes;
+    auto add = [&](const std::wstring& t, int c) { items.push_back(t); codes.push_back(c); };
+    add(L"فتح مسجّل الشاشة", 0);
+    add(L"الإعدادات", 6);
+    add(L"", -1);
+    add(rec ? L"إيقاف التسجيل" : L"بدء التسجيل", 1);
+    if (rec)
+        add(g_recorder.IsPaused() ? L"استئناف التسجيل" : L"إيقاف مؤقت", 2);
+    add(live ? L"إيقاف البث" : L"بدء البث", 3);
+    if (replay)
+        add(L"حفظ الإعادة", 4);
+    add(replay ? L"إيقاف الإعادة" : L"تشغيل الإعادة", 5);
+    add(L"", -1);
+    add(L"خروج", 9);
+
+    SetForegroundWindow(g_hwnd);     // لازم لحتى تتسكّر القائمة لما تكبس برّاها
+    const int pick = ShowMenu(items, -1, pt);
+    if (pick < 0 || codes[pick] < 0)
+        return;
+    switch (codes[pick])
+    {
+    case 0: ShowFromTray(); break;
+    case 1: ToggleRecording(); break;
+    case 2: TogglePause(); break;
+    case 3: ToggleStreaming(); break;
+    case 4: SaveReplay(); break;
+    case 5: if (replay) StopReplay(); else StartReplay(); break;
+    case 6: ShowFromTray(); OpenSettings(g_settingsPage); break;
+    case 9: QuitApp(); break;
+    }
+}
+
+std::unique_ptr<Panel> MakeReplayPanel()
+{
+    ReplayPanelHooks h;
+    h.changed = [](bool restart)
+    {
+        g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replaySet.seconds]);
+        SaveSettings();
+        if (restart)
+            RestartReplayIfActive();
+    };
+    h.pickFolder = []
+    {
+        std::wstring path = ReplayFolder();
+        if (!PickFolder(path, L"اختر مكان حفظ الإعادات"))
+            return false;
+        g_replaySet.folder = path;
+        return true;
+    };
+    h.openFolder = [] { OpenFolderPath(ReplayFolder()); };
+    h.folderPath = [] { return ReplayFolder(); };
+    h.monitors   = []
+    {
+        std::vector<std::wstring> names;
+        int n = 0;
+        for (const CaptureTarget& t : ReplayMonitors())
+            names.push_back(L"الشاشة " + std::to_wstring(++n) + (t.isPrimary ? L" (الرئيسية)" : L""));
+        return names;
+    };
+    h.micEnabled = [] { return g_micOn; };
+    h.sourceW = []
+    {
+        if (g_replaySet.source == 0)
+        {
+            const auto mons = ReplayMonitors();
+            if (!mons.empty())
+            {
+                const RECT& r = mons[std::clamp(g_replaySet.monitor, 0, (int)mons.size() - 1)].rect;
+                return (int)(r.right - r.left);
+            }
+        }
+        return g_scene.canvasW;
+    };
+    h.sourceH = []
+    {
+        if (g_replaySet.source == 0)
+        {
+            const auto mons = ReplayMonitors();
+            if (!mons.empty())
+            {
+                const RECT& r = mons[std::clamp(g_replaySet.monitor, 0, (int)mons.size() - 1)].rect;
+                return (int)(r.bottom - r.top);
+            }
+        }
+        return g_scene.canvasH;
+    };
+    return std::make_unique<ReplayPanel>(g_replaySet, std::move(h));
+}
+
+std::unique_ptr<Panel> MakeHotkeysPanel()
+{
+    return std::make_unique<HotkeysPanel>(g_hotkeys, []
+    {
+        g_hotkeys.Save(g_settingsPath);       // الإجراءات
+        SceneHotkeysFromManager();            // المشاهد بتنحفظ مع المشاهد
+        SaveScenes();
+        g_hotkeys.Apply(g_hwnd);
+    });
+}
+
+// نافذة الإعدادات (كل الإعدادات بمكان واحد، شوف SettingsPanel.h)
+void OnClick(int id, D2D1_POINT_2F p);
+void OpenSettings(int page)
+{
+    SettingsHooks h;
+    h.drawPage = [](int pg, float L, float top, float R) { return DrawSettingsPage(pg, L, top, R); };
+    h.click = [](int id)
+    {
+        // الكبسة جاية من نافذة الإعدادات: منحسب مكان الماوس (للقوائم المنبثقة متل المشفّر)
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(g_hwnd, &pt);
+        const float k = 96.0f / g_dpi;
+        OnClick(id, D2D1::Point2F(pt.x * k, pt.y * k));
+    };
+    g_settingsPage = page;
+    g_panels.Open(std::make_unique<SettingsPanel>(std::move(h), MakeReplayPanel(), MakeHotkeysPanel(), page));
+}
+
 void OnClick(int id, D2D1_POINT_2F p)
 {
     const bool rec = Busy();
@@ -3650,17 +4097,55 @@ void OnClick(int id, D2D1_POINT_2F p)
         if (!rec) { g_fpsChoice = id - ID_FPS_FIRST; SaveSettings(); RestartReplayIfActive(); }
         return;
     }
-    if (id == ID_HOTKEYS)
+    if (id >= ID_STARTUP_FIRST && id < ID_STARTUP_FIRST + 2)
     {
-        g_panels.Open(std::make_unique<HotkeysPanel>(g_hotkeys, []
-        {
-            g_hotkeys.Save(g_settingsPath);       // الإجراءات
-            SceneHotkeysFromManager();            // المشاهد بتنحفظ مع المشاهد
-            SaveScenes();
-            g_hotkeys.Apply(g_hwnd);
-        }));
+        SetRunAtStartup(id == ID_STARTUP_FIRST + 1);
         return;
     }
+    if (id == ID_FOLDER_CHANGE)
+    {
+        if (rec) return;
+        std::wstring path = g_folder;
+        if (PickFolder(path, L"اختر مكان حفظ التسجيلات"))
+        {
+            g_folder = path;
+            SaveSettings();
+            ShowMessage(L"ستُحفظ التسجيلات في: " + path, false);
+        }
+        return;
+    }
+    if (id == ID_FOLDER_OPEN)
+    {
+        OpenFolderPath(g_folder);
+        return;
+    }
+    if (id == ID_REPLAY_SETTINGS) { OpenSettings(SP_REPLAY); return; }
+    if (id == ID_OPEN_SETTINGS || id == ID_TAB_SETTINGS) { OpenSettings(g_settingsPage); return; }
+    if (id == ID_OVERAPP_FIRST || id == ID_OVERAPP_SECOND)
+    {
+        g_overlayOverApp = (id == ID_OVERAPP_FIRST);
+        SaveSettings();
+        return;
+    }
+    if (id >= ID_TOASTS_FIRST && id < ID_TOASTS_FIRST + 2)
+    {
+        g_toastsOn = (id == ID_TOASTS_FIRST);
+        SaveSettings();
+        return;
+    }
+    if (id == ID_TEST_TOAST)
+    {
+        // تجربة: بيطلع لما تصغّر البرنامج (وهو قدامك الإشعارات ما بتطلع)
+        g_overlay.Toast(Glyph::Check, Theme::Green, L"هكذا تبدو الإشعارات", L"تظهر في زاوية المؤشر ولا تظهر في التسجيل", true);
+        return;
+    }
+    if (id >= ID_CLOSE_FIRST && id < ID_CLOSE_FIRST + 2)
+    {
+        g_closeToTray = (id == ID_CLOSE_FIRST);
+        SaveSettings();
+        return;
+    }
+    if (id == ID_HOTKEYS) { OpenSettings(SP_HOTKEYS); return; }
     if (id >= ID_OVERLAY_FIRST && id < ID_OVERLAY_FIRST + 5)
     {
         g_overlayCorner = id - ID_OVERLAY_FIRST;
@@ -3675,13 +4160,6 @@ void OnClick(int id, D2D1_POINT_2F p)
     if (id >= ID_CONTAINER_FIRST && id < ID_CONTAINER_FIRST + 2)
     {
         if (!rec) { g_crashSafe = (id == ID_CONTAINER_FIRST); SaveSettings(); }
-        return;
-    }
-    if (id >= ID_REPLAY_SEC_FIRST && id < ID_REPLAY_SEC_FIRST + 4)
-    {
-        g_replayChoice = id - ID_REPLAY_SEC_FIRST;
-        g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replayChoice]);
-        SaveSettings();
         return;
     }
     if (id >= ID_TRANSITION_FIRST && id < ID_TRANSITION_FIRST + 3)
@@ -3753,6 +4231,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_hwnd = hwnd;
         g_dpi  = GetDpiForWindow(hwnd);
         CreateAppIcons();
+        g_tray.Add(hwnd, g_icons[0][1], L"مسجّل الشاشة");
         UpdateAppIcon();
         ApplyCanvasChoice();
         // المشاهد المحفوظة من آخر مرة، وإذا ما في: مشهد واحد فيه الشاشة الرئيسية
@@ -3792,8 +4271,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             os.micLevel  = g_micLevel;
             os.replay      = g_replay.IsActive();
             os.replaySaved = g_tick - g_replaySavedTick < 60;     // حوالي ثانيتين
-            os.monitor     = RecordedMonitor();
-            g_overlay.Update(os, g_overlayCorner, hwnd);
+            // الشاشة: اللي عم تتسجّل. إذا بس الإعادة شغّالة على "الشاشة كاملة": شاشتها
+            os.monitor     = (!os.recording && !os.streaming && os.replay && g_replaySet.source == 0 && g_replayMonitorHandle)
+                             ? g_replayMonitorHandle : RecordedMonitor();
+            // owner = فاضي: بيبيّنوا دايماً، حتى فوق نافذة البرنامج
+            g_overlay.Update(os, g_overlayCorner, g_overlayOverApp ? nullptr : hwnd);
         }
         g_appLevels.resize(g_appMixer.Count(), 0.0f);
         for (size_t i = 0; i < g_appLevels.size(); ++i)
@@ -3806,10 +4288,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         else if (g_tick % (Busy() ? 6 : 3) == 0)
             UpdatePreview();
-        if (g_tick == 20 && g_replayWanted && !g_replay.IsActive())   // كانت شغّالة آخر مرة
+        if (g_tick == 20 && g_replaySet.autoStart && !g_replay.IsActive())   // تشغيل تلقائي (من إعدادات الإعادة)
             StartReplay(true);
         if (g_streamer.IsActive())
             g_streamStatus = g_streamer.Status();
+        if (g_tick % 30 == 0 && (g_recorder.IsRecording() || g_streamer.IsActive()))   // وقت التسجيل بتلميح الأيقونة
+            g_tray.SetTip((g_recorder.IsRecording() ? L"● جارٍ التسجيل  " + FormatTime(g_recorder.ElapsedMs())
+                                                    : L"● بث مباشر  " + FormatTime(g_streamer.ElapsedMs())) + L"\nمسجّل الشاشة");
         if (g_tick % 60 == 0)           // كل ثانيتين: النوافذ والبرامج اللي رجعت انفتحت
         {
             ReconnectLostWindows();
@@ -4155,6 +4640,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case HK_MIC_MUTE:
             g_micAudio.SetMuted(!g_micAudio.IsMuted());
             ShowMessage(g_micAudio.IsMuted() ? L"كُتم الميكروفون" : L"أُلغي كتم الميكروفون", false);
+            if (g_micAudio.IsMuted()) Notify(Glyph::MicOff, Theme::Red, L"الميكروفون مكتوم");
+            else                      Notify(Glyph::Mic, Theme::Green, L"الميكروفون يعمل");
             SaveSettings();
             break;
         case HK_NEXT_SCENE:
@@ -4169,6 +4656,42 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     }
+
+    case WM_CLOSE:           // ✕: منخبّي البرنامج جنب الساعة (إلا إذا اخترت "إغلاق البرنامج")
+        if (g_closeToTray && !g_reallyQuit && g_tray.IsAdded())
+        {
+            HideToTray();
+            return 0;
+        }
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_ENDSESSION:      // ويندوز عم يطفي: منسكّر صح (وبينحفظ التسجيل)
+        if (wParam)
+            QuitApp();
+        return 0;
+
+    case WM_SHOWAPP:         // حدا فتح البرنامج مرة تانية: منبيّن هالنسخة بدل نسخة جديدة
+        ShowFromTray();
+        return 0;
+
+    case WM_TRAY:
+        // (الطريقة الحديثة: كبسة = NIN_SELECT ، كليك يمين = WM_CONTEXTMENU. ويندوز بيبعت كمان
+        //  WM_LBUTTONUP و WM_RBUTTONUP بس ما منستعملهم لحتى ما ينعمل الشي مرتين)
+        switch (LOWORD(lParam))
+        {
+        case NIN_SELECT:
+        case NIN_KEYSELECT:
+            if (IsWindowVisible(hwnd) && !IsIconic(hwnd) && GetForegroundWindow() == hwnd)
+                HideToTray();          // كبسة تانية بتخبّيه
+            else
+                ShowFromTray();
+            break;
+        case WM_CONTEXTMENU:
+            ShowTrayMenu(POINT{ GET_X_LPARAM(wParam), GET_Y_LPARAM(wParam) });
+            break;
+        }
+        return 0;
 
     case WM_STREAMER_DONE:   // البث (أو الإعادة) وقف لحالو (مشكلة بمشفّر الفيديو)
         if (lParam == 1)
@@ -4202,7 +4725,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_micAudio.Stop();
         g_appMixer.Stop();
         g_overlay.Destroy();
+        g_tray.Remove();
         PostQuitMessage(0);
+        return 0;
+    }
+    if (msg == WM_TASKBARCREATED && WM_TASKBARCREATED)     // شريط المهام رجع اشتغل: منرجّع الأيقونة
+    {
+        g_tray.Add(hwnd, g_icons[g_iconState == 3 ? 1 : std::max(0, g_iconState)][1], L"مسجّل الشاشة");
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -4211,8 +4740,26 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 // =============================================================
 //  نقطة البداية
 // =============================================================
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR cmdLine, int nCmdShow)
 {
+    const wchar_t CLASS_NAME[] = L"ScreenRecorderWindow";
+
+    // نسخة وحدة بس: إذا البرنامج شغّال (حتى لو مخبّى جنب الساعة) منبيّنه ومنطلع
+    // (منفحص أول شي، قبل ما نفتح الصوت والكاميرا)
+    HANDLE single = CreateMutexW(nullptr, TRUE, L"ScreenRecorder_SingleInstance");
+    if (single && GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        if (HWND other = FindWindowW(CLASS_NAME, nullptr))
+        {
+            AllowSetForegroundWindow(ASFW_ANY);
+            PostMessageW(other, WM_SHOWAPP, 0, 0);
+        }
+        CloseHandle(single);
+        return 0;
+    }
+    // --tray: بدأ مع ويندوز، فمنبلّش مخفي جنب الساعة
+    const bool startHidden = cmdLine && wcsstr(cmdLine, L"--tray") != nullptr;
+
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     MFStartup(MF_VERSION);
@@ -4240,7 +4787,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
     if (g_systemOn) g_systemAudio.Start();
     if (g_micOn)    g_micAudio.Start();
 
-    const wchar_t CLASS_NAME[] = L"ScreenRecorderWindow";
     WNDCLASSW wc = {};
     wc.lpfnWndProc   = WindowProc;
     wc.hInstance     = hInstance;
@@ -4276,7 +4822,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
 
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
-    ShowWindow(hwnd, nCmdShow);
+    ShowWindow(hwnd, startHidden ? SW_HIDE : nCmdShow);
 
     MSG msg = {};
     while (GetMessageW(&msg, nullptr, 0, 0))
