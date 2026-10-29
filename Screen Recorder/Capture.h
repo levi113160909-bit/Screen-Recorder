@@ -52,6 +52,10 @@ struct SceneLayer
     bool          mirror = false;                // الكاميرا: عكس متل المراية
     unsigned      color = 0xFFFFFFFF;            // النص: اللون (ARGB)
     bool          background = false;            // النص: خلفية غامقة وراه
+
+    // القص (Alt + سحب المقبض): قديش منقص من كل طرف، كنسبة من المصدر (0..1)
+    double        cropL = 0, cropT = 0, cropR = 0, cropB = 0;
+    bool          HasCrop() const { return cropL > 0 || cropT > 0 || cropR > 0 || cropB > 0; }
 };
 
 // بيرجّع كل الشاشات، وبعدها كل النوافذ المفتوحة (ما عدا exclude)
@@ -82,7 +86,8 @@ public:
 
     // بيرسم المصدر بالمستطيل (x, y, w, h) على dst
     // بيرجّع false إذا النافذة انسكّرت
-    bool Grab(const CaptureTarget& target, HDC dst, int x, int y, int w, int h, bool drawCursor);
+    bool Grab(const CaptureTarget& target, HDC dst, int x, int y, int w, int h, bool drawCursor,
+              double cropL = 0, double cropT = 0, double cropR = 0, double cropB = 0);
 
 private:
     HDC     m_screen = nullptr;

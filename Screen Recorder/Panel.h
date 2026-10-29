@@ -41,6 +41,8 @@ public:
     virtual void           OnClick(int /*id*/) {}
     virtual void           OnCommit() {}                          // بعد أي تغيير (منحفظ الإعدادات)
     virtual bool           OnChar(wchar_t /*c*/) { return false; }  // كتابة (مثلاً خانة بحث)
+    virtual bool           OnKeyDown(WPARAM /*vk*/) { return false; }  // كبسة زر (true = عالجتها)
+    virtual bool           CapturingKeys() const { return false; }     // بدها كل الأزرار (حتى Alt و F10)
 
 protected:
     // ---- عناصر جاهزة لكل النوافذ ----
@@ -106,6 +108,7 @@ public:
     void OnWheel(D2D1_POINT_2F p, float steps);
     void OnKey(WPARAM key);
     void OnChar(wchar_t c);
+    bool WantsKeys() const { return m_panel && m_panel->CapturingKeys(); }
     // شكل الماوس: true = إيد (فوق شي بينكبس)
     bool WantsHandCursor(D2D1_POINT_2F p) const;
 

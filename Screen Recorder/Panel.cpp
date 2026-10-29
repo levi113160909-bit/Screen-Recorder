@@ -253,6 +253,8 @@ void PanelHost::OnWheel(D2D1_POINT_2F p, float steps)
 
 void PanelHost::OnKey(WPARAM key)
 {
+    if (m_panel && m_panel->OnKeyDown(key))
+        return;
     if (key == VK_ESCAPE)
         Close();
 }

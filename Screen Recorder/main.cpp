@@ -35,6 +35,9 @@
 #include "AppAudio.h"
 #include "AppAudioPanel.h"
 #include "AddSourcePanel.h"
+#include "Overlay.h"
+#include "Hotkeys.h"
+#include "HotkeysPanel.h"
 #include <commdlg.h>
 #include <wincrypt.h>
 #include <wincodec.h>
@@ -70,6 +73,8 @@ enum : int
     ID_TRANSITION_FIRST = 160,  // 3 خيارات (الانتقال بين المشاهد)
     ID_VERTICAL_FIRST   = 170,  // خيارين (طريقة البث العمودي)
     ID_AUDIO_TRACKS_FIRST = 180,  // خيارين (مسار صوت واحد / مسارات منفصلة)
+    ID_OVERLAY_FIRST    = 190,  // 5 خيارات (مؤشر التسجيل: مخفي + 4 زوايا)
+    ID_HOTKEYS          = 200,  // زر نافذة الاختصارات
     ID_LAYER_FIRST   = 1000,    // الطبقة رقم id = ID_LAYER_FIRST + id
     ID_EYE_FIRST     = 3000,
     ID_DELETE_FIRST  = 5000,
@@ -84,7 +89,7 @@ enum : int
 };
 
 constexpr UINT_PTR TIMER_FRAME = 1;
-constexpr int      HOTKEY_RECORD = 1, HOTKEY_PAUSE = 2, HOTKEY_STREAM = 3, HOTKEY_REPLAY = 4;
+HotkeyManager g_hotkeys;     // الاختصارات (بتتغيّر من نافذة "اختصارات لوحة المفاتيح")
 
 // =============================================================
 //  متغيرات البرنامج
@@ -107,6 +112,7 @@ struct SceneData
     std::wstring            name;
     std::vector<SceneLayer> layers;
     std::vector<AppAudioEntry> apps;   // أصوات البرامج بهالمشهد
+    HotkeyBinding           hotkey;    // اختصار التبديل لهالمشهد (بنافذة الاختصارات)
 };
 std::vector<SceneData> g_scenes;
 int                    g_activeScene = 0;
@@ -177,6 +183,7 @@ HICON g_icons[3][2] = {};              // [عادي / عم يسجّل / متوق
 int   g_iconState = -1;
 
 int g_tick = 0;
+int g_replaySavedTick = -1000;       // إمتى آخر مرة حفظنا إعادة (للمؤشر)
 int g_tab  = 0;      // 0 = المصادر ، 1 = البث ، 2 = الإعدادات
 
 // -------- الإعدادات (بتنحفظ بملف settings.ini) --------
@@ -190,6 +197,9 @@ UINT32       g_customMbps     = 12;
 int          g_encoderMode    = 0;     // 0 تلقائي ، 1 بطاقة الرسومات ، 2 المعالج
 bool         g_crashSafe      = true;  // MP4 آمن (مقطّع)
 bool         g_separateTracks = false; // مسار صوت لكل مصدر (للمونتاج)
+int          g_overlayCorner  = 1;     // مؤشر التسجيل: 0 مخفي ، 1 أعلى اليمين ، 2 أعلى اليسار ، 3 أسفل اليمين ، 4 أسفل اليسار
+RecordingOverlay g_overlay;
+int          g_overlayLastCorner = 1;  // لما تخفيه بالاختصار ومنرجّعه، بيرجع لنفس الزاوية
 std::wstring g_encoderName;            // اسم المشفّر المختار (لبطاقة الرسومات)
 std::vector<Recorder::EncoderInfo> g_encoders;
 std::wstring g_settingsPath;
@@ -766,6 +776,8 @@ void FitLayer(SceneLayer& l, int cw, int ch)
         sw = cw;
         sh = ch;
     }
+    sw = std::max(1, (int)std::lround(sw * (1 - l.cropL - l.cropR)));   // الجزء الباقي بعد القص
+    sh = std::max(1, (int)std::lround(sh * (1 - l.cropT - l.cropB)));
     const double s = std::min((double)cw / sw, (double)ch / sh);
     l.w = sw * s;
     l.h = sh * s;
@@ -909,7 +921,7 @@ void LayerCommand(int id, int cmd)
     {
     case 0: FitLayer(l, cw, ch); break;                                        // ملاءمة
     case 1: l.x = 0; l.y = 0; l.w = cw; l.h = ch; break;                        // تمديد
-    case 2: { int sw, sh; if (LayerNaturalSize(l, sw, sh)) { l.w = sw; l.h = sh; }
+    case 2: { int sw, sh; if (LayerNaturalSize(l, sw, sh)) { l.w = sw * (1 - l.cropL - l.cropR); l.h = sh * (1 - l.cropT - l.cropB); }
               l.x = (cw - l.w) / 2; l.y = (ch - l.h) / 2; break; }               // الحجم الأصلي
     case 3: l.x = (cw - l.w) / 2; l.y = (ch - l.h) / 2; break;                  // توسيط
     case 5: if (i + 1 < (int)g_scene.layers.size()) std::swap(g_scene.layers[i], g_scene.layers[i + 1]); break;  // للأمام
@@ -936,7 +948,7 @@ void RefitAspect(int id)
     if (i < 0) return;
     SceneLayer& l = g_scene.layers[i];
     const double cx = l.x + l.w / 2;
-    l.w = l.h * nw / nh;
+    l.w = l.h * (nw * (1 - l.cropL - l.cropR)) / (nh * (1 - l.cropT - l.cropB));
     l.x = cx - l.w / 2;
 }
 
@@ -1017,6 +1029,25 @@ void LayerMediaCommand(int id, int code, POINT pt)
     SaveScenes();
 }
 
+// إلغاء القص: المحتوى بيضل بنفس الحجم، والطبقة بترجع تكبر لحجم المصدر كامل
+void ResetCrop(int id)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        const int i = FindLayer(id);
+        if (i < 0) return;
+        SceneLayer& l = g_scene.layers[i];
+        const double fw = l.w / std::max(0.05, 1 - l.cropL - l.cropR);
+        const double fh = l.h / std::max(0.05, 1 - l.cropT - l.cropB);
+        l.x -= l.cropL * fw;
+        l.y -= l.cropT * fh;
+        l.w = fw;
+        l.h = fh;
+        l.cropL = l.cropT = l.cropR = l.cropB = 0;
+    }
+    SaveScenes();
+}
+
 void ShowLayerMenu(int id, POINT screenPt)
 {
     bool visible = true;
@@ -1053,9 +1084,16 @@ void ShowLayerMenu(int id, POINT screenPt)
         extra(copy.background ? L"إزالة الخلفية" : L"إضافة خلفية خلف النص", 105);
     }
 
+    if (copy.HasCrop())
+    {
+        extra(L"", -1);
+        extra(L"إلغاء القص", 200);
+    }
+
     const int cmd = ShowMenu(items, -1, screenPt);
     if (cmd < 0) return;
-    if (cmd >= 10)     { if (codes[cmd] >= 0) LayerMediaCommand(id, codes[cmd], screenPt); }
+    if (cmd >= 10 && codes[cmd] == 200) ResetCrop(id);
+    else if (cmd >= 10) { if (codes[cmd] >= 0) LayerMediaCommand(id, codes[cmd], screenPt); }
     else if (cmd == 9) RemoveLayer(id);
     else               LayerCommand(id, cmd);
 }
@@ -1161,6 +1199,62 @@ void StoreActiveScene()
     }
 }
 
+// الشاشة اللي عم تتسجّل (لمؤشر التسجيل): أكبر شاشة أو نافذة ظاهرة بالمشهد
+// (الشاشة نفسها، أو الشاشة اللي عليها النافذة). كل ثانية منحسبها من جديد
+HMONITOR RecordedMonitor()
+{
+    static HMONITOR cached = nullptr;
+    static int      lastTick = -100;
+    if (g_tick - lastTick < 30)
+        return cached;
+    lastTick = g_tick;
+    std::lock_guard<std::mutex> lock(g_scene.mutex);
+    double best = 0;
+    HMONITOR found = nullptr;
+    for (const SceneLayer& l : g_scene.layers)
+    {
+        if (l.kind != LayerKind::Capture || !l.visible || l.lost || l.w * l.h <= best)
+            continue;
+        HMONITOR m = nullptr;
+        if (l.target.isMonitor)
+        {
+            const POINT c{ (l.target.rect.left + l.target.rect.right) / 2, (l.target.rect.top + l.target.rect.bottom) / 2 };
+            m = MonitorFromPoint(c, MONITOR_DEFAULTTONULL);
+        }
+        else if (l.target.hwnd && IsWindow(l.target.hwnd))
+            m = MonitorFromWindow(l.target.hwnd, MONITOR_DEFAULTTONULL);
+        if (m)
+        {
+            best  = l.w * l.h;
+            found = m;
+        }
+    }
+    cached = found;          // فاضي = الرئيسية
+    return cached;
+}
+
+// اختصارات المشاهد: كل ما تغيّرت المشاهد منبعت اللائحة لمدير الاختصارات
+void SyncSceneHotkeys()
+{
+    std::vector<std::wstring>  names;
+    std::vector<HotkeyBinding> keys;
+    for (const SceneData& s : g_scenes)
+    {
+        names.push_back(s.name);
+        keys.push_back(s.hotkey);
+    }
+    g_hotkeys.SetScenes(names, keys);
+    if (g_hwnd)
+        g_hotkeys.Apply(g_hwnd);
+}
+
+// والعكس: بعد ما تغيّر اختصار بالنافذة منرجّعه للمشاهد (لحتى ينحفظ معها)
+void SceneHotkeysFromManager()
+{
+    for (int i = 0; i < (int)g_scenes.size(); ++i)
+        g_scenes[i].hotkey = g_hotkeys.Get(HK_COUNT + i);
+}
+
 // في ولا مشهد فيه أصوات برامج؟ (وقتها منضيف الخلّاط للتسجيل والبث)
 bool AnySceneHasApps()
 {
@@ -1211,6 +1305,7 @@ void AddScene()
     }
     g_appMixer.SetEntries({});
     g_appLevels.clear();
+    SyncSceneHotkeys();
     g_activeScene   = (int)g_scenes.size() - 1;
     g_selectedLayer = 0;
 }
@@ -1220,6 +1315,7 @@ void DuplicateScene(int index)
     StoreActiveScene();
     SceneData copy = g_scenes[index];
     copy.name += L" (نسخة)";
+    copy.hotkey = {};                             // الاختصار ما بيتكرر
     {
         std::lock_guard<std::mutex> lock(g_scene.mutex);
         for (SceneLayer& l : copy.layers)
@@ -1228,6 +1324,7 @@ void DuplicateScene(int index)
     g_scenes.insert(g_scenes.begin() + index + 1, copy);
     if (g_activeScene > index)
         ++g_activeScene;
+    SyncSceneHotkeys();
     SwitchScene(index + 1);
 }
 
@@ -1238,6 +1335,7 @@ void DeleteScene(int index)
     StoreActiveScene();
     const bool deletingActive = (index == g_activeScene);
     g_scenes.erase(g_scenes.begin() + index);
+    SyncSceneHotkeys();
     if (index < g_activeScene)
         --g_activeScene;
     g_activeScene = std::clamp(g_activeScene, 0, (int)g_scenes.size() - 1);
@@ -1269,21 +1367,23 @@ void SaveScenes()
     fwprintf(f, L"A\t%d\n", g_activeScene);
     for (const SceneData& s : g_scenes)
     {
-        fwprintf(f, L"S\t%ls\n", Clean(s.name).c_str());
+        fwprintf(f, L"S\t%ls\t%u\t%u\n", Clean(s.name).c_str(), s.hotkey.mods, s.hotkey.vk);
         for (const SceneLayer& l : s.layers)
         {
             if (l.kind != LayerKind::Capture)       // كاميرا / صورة / نص
             {
-                fwprintf(f, L"M\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%d\t%d\t%u\t%d\t%ls\t%ls\n",
+                fwprintf(f, L"M\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%d\t%d\t%u\t%d\t%ls\t%ls\t%.5f\t%.5f\t%.5f\t%.5f\n",
                          (int)l.kind, l.x, l.y, l.w, l.h, l.visible ? 1 : 0, l.shape, l.mirror ? 1 : 0,
-                         l.color, l.background ? 1 : 0, Clean(l.source).c_str(), Clean(l.target.name).c_str());
+                         l.color, l.background ? 1 : 0, Clean(l.source).c_str(), Clean(l.target.name).c_str(),
+                         l.cropL, l.cropT, l.cropR, l.cropB);
                 continue;
             }
             const RECT& r = l.target.rect;
-            fwprintf(f, L"L\t%lc\t%ld\t%ld\t%ld\t%ld\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%ls\t%ls\t%ls\n",
+            fwprintf(f, L"L\t%lc\t%ld\t%ld\t%ld\t%ld\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%ls\t%ls\t%ls\t%.5f\t%.5f\t%.5f\t%.5f\n",
                      l.target.isMonitor ? L'm' : L'w', r.left, r.top, r.right, r.bottom,
                      l.x, l.y, l.w, l.h, l.visible ? 1 : 0,
-                     Clean(l.target.className).c_str(), Clean(l.target.exePath).c_str(), Clean(l.target.name).c_str());
+                     Clean(l.target.className).c_str(), Clean(l.target.exePath).c_str(), Clean(l.target.name).c_str(),
+                     l.cropL, l.cropT, l.cropR, l.cropB);
         }
         for (const AppAudioEntry& a : s.apps)       // أصوات البرامج
             fwprintf(f, L"P\t%d\t%d\t%ls\t%ls\n", (int)std::lround(a.volume * 100), a.muted ? 1 : 0,
@@ -1304,6 +1404,17 @@ std::vector<std::wstring> SplitTabs(const std::wstring& line)
         start = tab + 1;
     }
     return parts;
+}
+
+// القص المحفوظ (بآخر السطر، 4 أرقام). الملفات القديمة ما فيها: بيضل صفر
+void ReadCrop(SceneLayer& l, const std::vector<std::wstring>& p, size_t start)
+{
+    if (p.size() < start + 4)
+        return;
+    l.cropL = std::clamp(_wtof(p[start].c_str()), 0.0, 0.95);
+    l.cropT = std::clamp(_wtof(p[start + 1].c_str()), 0.0, 0.95);
+    l.cropR = std::clamp(_wtof(p[start + 2].c_str()), 0.0, 0.95 - l.cropL);
+    l.cropB = std::clamp(_wtof(p[start + 3].c_str()), 0.0, 0.95 - l.cropT);
 }
 
 bool LoadScenes()
@@ -1328,7 +1439,12 @@ bool LoadScenes()
         if (p[0] == L"A" && p.size() >= 2)
             active = _wtoi(p[1].c_str());
         else if (p[0] == L"S" && p.size() >= 2)
+        {
             g_scenes.push_back({ p[1], {} });
+            if (p.size() >= 4)                     // اختصار المشهد (الملفات القديمة ما فيها)
+                g_scenes.back().hotkey = { (UINT)wcstoul(p[2].c_str(), nullptr, 10) & 0xF,
+                                           (UINT)wcstoul(p[3].c_str(), nullptr, 10) & 0xFF };
+        }
         else if (p[0] == L"M" && p.size() >= 13 && !g_scenes.empty())
         {
             SceneLayer l;
@@ -1346,6 +1462,7 @@ bool LoadScenes()
             l.source      = p[11];
             l.target.name = p[12];
             l.target.isMonitor = false;
+            ReadCrop(l, p, 13);
             if (l.w > 1 && l.h > 1)
                 g_scenes.back().layers.push_back(l);
         }
@@ -1374,6 +1491,7 @@ bool LoadScenes()
             t.className = p[11];
             t.exePath   = p[12];
             t.name      = p[13];
+            ReadCrop(l, p, 14);
             if (t.isMonitor)
             {
                 // نفس الشاشة إذا لسا موصولة، وإلا الرئيسية
@@ -1505,6 +1623,7 @@ void RenameScene(int index)
         name = (a == std::wstring::npos) ? L"" : name.substr(a, b - a + 1);
         if (!name.empty())
             g_scenes[index].name = name;
+        SyncSceneHotkeys();       // الاسم الجديد بنافذة الاختصارات
         SaveScenes();
     }
 }
@@ -1575,6 +1694,7 @@ void SaveSettings()
     put(L"EncoderName", g_encoderName);
     put(L"CrashSafe",   g_crashSafe ? L"1" : L"0");
     put(L"SeparateTracks", g_separateTracks ? L"1" : L"0");
+    put(L"OverlayCorner",  std::to_wstring(g_overlayCorner));
     put(L"SystemAudio", g_systemOn ? L"1" : L"0");
     put(L"Microphone",  g_micOn ? L"1" : L"0");
     put(L"SystemDevice", g_systemAudio.DeviceId());
@@ -1632,6 +1752,8 @@ void LoadSettings()
     g_encoderName  = getStr(L"EncoderName");
     g_crashSafe    = getInt(L"CrashSafe", 1) != 0;
     g_separateTracks = getInt(L"SeparateTracks", 0) != 0;
+    g_overlayCorner  = std::clamp(getInt(L"OverlayCorner", 1), 0, 4);
+    g_hotkeys.Load(g_settingsPath);
     g_systemOn     = getInt(L"SystemAudio", 1) != 0;
     g_micOn        = getInt(L"Microphone", 0) != 0;
     g_systemAudio.SetDeviceId(getStr(L"SystemDevice"));
@@ -2324,7 +2446,11 @@ void StartReplay(bool quiet = false)
     g_replayWanted = true;
     SaveSettings();
     if (!quiet)
-        ShowMessage(L"الإعادة تعمل — اضغط F7 لحفظ آخر " + std::to_wstring(REPLAY_SECONDS[g_replayChoice]) + L" ثانية", false);
+        {
+            const std::wstring k = HotkeyManager::Text(g_hotkeys.Get(HK_REPLAY_SAVE));
+            ShowMessage(L"الإعادة تعمل — " + (k.empty() ? std::wstring(L"احفظ") : L"اضغط " + LtrText(k) + L" لحفظ") +
+                        L" آخر " + std::to_wstring(REPLAY_SECONDS[g_replayChoice]) + L" ثانية", false);
+        }
 }
 
 void StopReplay()
@@ -2357,6 +2483,7 @@ void SaveReplay()
     if (g_replayBuffer->Save(path, error))
     {
         g_lastFile = path;
+        g_replaySavedTick = g_tick;          // المؤشر بيبيّن "حُفظ" ثانيتين
         ShowMessage(L"✓ حُفظت الإعادة: " + std::wstring(name), false);
     }
     else
@@ -2522,13 +2649,30 @@ void DrawPreview(const D2D1_RECT_F& area)
         const D2D1_RECT_F r = LayerToDip(l, cw);
         if (l.id == g_selectedLayer)
         {
-            Stroke(r, Theme::Accent, 0, 2);
+            // وضع القص (Alt): إطار أخضر، وإطار خفيف للمصدر الكامل لتعرف شو مقصوص
+            const bool cropping = (GetKeyState(VK_MENU) & 0x8000) != 0 && (g_drag == Drag::None || g_drag == Drag::Resize);
+            const D2D1_COLOR_F c = cropping ? Theme::Green : Theme::Accent;
+            if (cropping && l.HasCrop())
+            {
+                const float fw = (r.right - r.left) / (float)std::max(0.05, 1 - l.cropL - l.cropR);
+                const float fh = (r.bottom - r.top) / (float)std::max(0.05, 1 - l.cropT - l.cropB);
+                const float fx = r.left - (float)l.cropL * fw, fy = r.top - (float)l.cropT * fh;
+                const D2D1_RECT_F full = Rect(fx, fy, fx + fw, fy + fh);
+                Fill(Rect(full.left, full.top, full.right, r.top), D2D1::ColorF(0x000000, 0.45f));        // المقصوص فوق
+                Fill(Rect(full.left, r.bottom, full.right, full.bottom), D2D1::ColorF(0x000000, 0.45f));  // تحت
+                Fill(Rect(full.left, r.top, r.left, r.bottom), D2D1::ColorF(0x000000, 0.45f));            // يسار
+                Fill(Rect(r.right, r.top, full.right, r.bottom), D2D1::ColorF(0x000000, 0.45f));          // يمين
+                Stroke(full, WithAlpha(Theme::White, 0.35f), 0, 1);
+            }
+            Stroke(r, c, 0, 2);
             for (int i = 0; i < 8; ++i)
             {
                 const D2D1_POINT_2F p = HandlePos(r, i);
-                Fill(Rect(p.x - 5, p.y - 5, p.x + 5, p.y + 5), Theme::White);
-                Stroke(Rect(p.x - 5, p.y - 5, p.x + 5, p.y + 5), Theme::Accent, 0, 1);
+                Fill(Rect(p.x - 5, p.y - 5, p.x + 5, p.y + 5), cropping ? c : Theme::White);
+                Stroke(Rect(p.x - 5, p.y - 5, p.x + 5, p.y + 5), cropping ? Theme::White : c, 0, 1);
             }
+            if (cropping)
+                Text(L"قص", g_fSmallLtr.Get(), Rect(r.left, r.top - 22, r.left + 40, r.top - 4), Theme::Green);
         }
         else if (Inside(r, g_mouse) && g_drag == Drag::None)
         {
@@ -2564,7 +2708,7 @@ void DrawPreview(const D2D1_RECT_F& area)
                                + L"  •  " + MbpsText(CurrentBitrate()) + L" ميغابت/ث";
     Text(summary, g_fSmall.Get(), Rect(area.left + 16, area.bottom - 42, area.right - 16, area.bottom - 14),
          rec ? Theme::Text : Theme::SubText);
-    Text(L"اسحب للتحريك • المقابض لتغيير الحجم • Ctrl بدون التصاق • زر الفأرة الأيمن لخيارات أكثر", g_fSmallEnd.Get(),
+    Text(L"اسحب للتحريك • المقابض لتغيير الحجم • Alt مع المقبض للقص • Ctrl بدون التصاق • الزر الأيمن للمزيد", g_fSmallEnd.Get(),
          Rect(area.left + 16, area.bottom - 42, area.right - 16, area.bottom - 14), Theme::Off);
 }
 
@@ -2852,6 +2996,10 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
     auto Label = [&](const wchar_t* s) { Text(s, g_fSection.Get(), Rect(L, y, R, y + 22), Theme::SubText); y += 24; };
     auto Hint  = [&](const std::wstring& s) { Text(s, g_fSmall.Get(), Rect(L, y, R, y + 18), Theme::SubText); y += 24; };
 
+    // اختصارات لوحة المفاتيح (بتشتغل حتى وقت التسجيل)
+    DrawButton(Rect(L, y, R, y + 38), L"اختصارات لوحة المفاتيح", ID_HOTKEYS, false, true, Icon::Keyboard);
+    y += 50;
+
     // 1) دقة الفيديو (حجم اللوحة)
     int pw, ph;
     PrimaryMonitorSize(pw, ph);
@@ -2913,6 +3061,17 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
     else
         Hint(L"كل الأصوات مدمجة في مسار واحد");
 
+    // مؤشر التسجيل على الشاشة (بيشتغل حتى وقت التسجيل)
+    Label(L"مؤشر التسجيل على الشاشة");
+    DrawSegmented(Rect(L, y, R, y + 34), { L"مخفي", L"\u25E5", L"\u25E4", L"\u25E2", L"\u25E3" },
+                  g_overlayCorner, ID_OVERLAY_FIRST, true);
+    y += 38;
+    {
+        static const wchar_t* where[] = { L"لا يظهر أي مؤشر", L"أعلى يمين الشاشة", L"أعلى يسار الشاشة",
+                                          L"أسفل يمين الشاشة", L"أسفل يسار الشاشة" };
+        Hint(std::wstring(where[g_overlayCorner]) + (g_overlayCorner ? L" • لا يظهر في التسجيل" : L""));
+    }
+
     // 7) الانتقال بين المشاهد (بيشتغل حتى وقت التسجيل)
     Label(L"الانتقال بين المشاهد");
     DrawSegmented(Rect(L, y, R, y + 34), { L"فوري", L"تلاشٍ سريع", L"تلاشٍ ناعم" }, g_transitionChoice, ID_TRANSITION_FIRST, true);
@@ -2922,7 +3081,11 @@ void DrawSettingsTab(const D2D1_RECT_F& side, float y)
     Label(L"مدة الإعادة (حفظ آخر لحظات)");
     DrawSegmented(Rect(L, y, R, y + 34), { L"15 ث", L"30 ث", L"60 ث", L"دقيقتان" }, g_replayChoice, ID_REPLAY_SEC_FIRST, true);
     y += 38;
-    Hint(L"شغّل الإعادة من الشريط السفلي، واضغط F7 لحفظ آخر " + std::to_wstring(REPLAY_SECONDS[g_replayChoice]) + L" ثانية");
+    {
+        const std::wstring k = HotkeyManager::Text(g_hotkeys.Get(HK_REPLAY_SAVE));
+        Hint(L"شغّل الإعادة من الشريط السفلي، " + (k.empty() ? std::wstring(L"واحفظ") : L"واضغط " + LtrText(k) + L" لحفظ") +
+             L" آخر " + std::to_wstring(REPLAY_SECONDS[g_replayChoice]) + L" ثانية");
+    }
 
     // محرّك التصوير المستعمل
     const bool gpu = g_previewCompositor.UsingGpu();
@@ -3150,8 +3313,21 @@ void DrawBottomBar(const D2D1_RECT_F& bar)
     else
         Text(rec ? L"المشفّر: " + g_recorder.EncoderName() : std::wstring(L"رتّب المشهد ثم اضغط الزر الأحمر"),
              g_fBody.Get(), Rect(info.left, cy - 22, info.right, cy), Theme::Text);
-    Text(L"F9 تسجيل  •  F10 إيقاف مؤقت  •  F8 بث  •  F7 حفظ الإعادة", g_fSmall.Get(),
-         Rect(info.left, cy + 2, info.right, cy + 22), Theme::SubText);
+    {
+        // الاختصارات الحالية (اللي إلها زر بس)
+        std::wstring keys;
+        const std::pair<int, const wchar_t*> shown[] = { { HK_RECORD, L"تسجيل" }, { HK_PAUSE, L"إيقاف مؤقت" },
+                                                         { HK_STREAM, L"بث" }, { HK_REPLAY_SAVE, L"حفظ الإعادة" } };
+        for (const auto& [action, label] : shown)
+        {
+            const std::wstring k = HotkeyManager::Text(g_hotkeys.Get(action));
+            if (k.empty())
+                continue;
+            if (!keys.empty()) keys += L"  •  ";
+            keys += LtrText(k) + L" " + label;
+        }
+        Text(keys, g_fSmall.Get(), Rect(info.left, cy + 2, info.right, cy + 22), Theme::SubText);
+    }
 }
 
 // =============================================================
@@ -3313,7 +3489,7 @@ bool SnapValue(double& v, const std::vector<double>& lines, double range, double
     return hit;
 }
 
-void UpdateDrag(D2D1_POINT_2F p, bool shift, bool noSnap)
+void UpdateDrag(D2D1_POINT_2F p, bool shift, bool noSnap, bool crop)
 {
     std::lock_guard<std::mutex> lock(g_scene.mutex);
     g_guidesX.clear();
@@ -3373,6 +3549,30 @@ void UpdateDrag(D2D1_POINT_2F p, bool shift, bool noSnap)
     if (R && SnapValue(right,  edges.x, range, &g)) g_guidesX.push_back(g);
     if (T && SnapValue(top,    edges.y, range, &g)) g_guidesY.push_back(g);
     if (B && SnapValue(bottom, edges.y, range, &g)) g_guidesY.push_back(g);
+
+    // ---- القص (Alt): الحافة بتتحرك بس المحتوى بيضل مكانه وبنفس حجمه ----
+    if (crop)
+    {
+        // حجم المصدر كامل (قبل القص) على اللوحة
+        const double fw = o.w / std::max(0.05, 1 - o.cropL - o.cropR);
+        const double fh = o.h / std::max(0.05, 1 - o.cropT - o.cropB);
+        const double minW = 16 / fw, minH = 16 / fh;            // أصغر شي 16 بكسل
+        double cl = o.cropL, cr = o.cropR, ct = o.cropT, cb = o.cropB;
+        // ما منقص أكتر من المصدر، وما منكبّر أكبر منه (القص ما بيصير سالب)
+        if (L) cl = std::clamp(o.cropL + (left - o.x) / fw, 0.0, 1 - cr - minW);
+        if (R) cr = std::clamp(o.cropR + (o.x + o.w - right) / fw, 0.0, 1 - cl - minW);
+        if (T) ct = std::clamp(o.cropT + (top - o.y) / fh, 0.0, 1 - cb - minH);
+        if (B) cb = std::clamp(o.cropB + (o.y + o.h - bottom) / fh, 0.0, 1 - ct - minH);
+        // مكان المصدر الكامل ثابت، ومنه منحسب الطبقة
+        const double fx = o.x - o.cropL * fw, fy = o.y - o.cropT * fh;
+        l.cropL = cl;  l.cropR = cr;  l.cropT = ct;  l.cropB = cb;
+        l.x = fx + cl * fw;
+        l.y = fy + ct * fh;
+        l.w = fw * (1 - cl - cr);
+        l.h = fh * (1 - ct - cb);
+        return;
+    }
+    l.cropL = o.cropL;  l.cropR = o.cropR;  l.cropT = o.cropT;  l.cropB = o.cropB;
 
     // الزوايا بتحافظ على النسبة (إلا إذا ضاغط Shift)
     if ((L || R) && (T || B) && !shift && o.h > 0)
@@ -3448,6 +3648,23 @@ void OnClick(int id, D2D1_POINT_2F p)
     if (id >= ID_FPS_FIRST && id < ID_FPS_FIRST + 4)
     {
         if (!rec) { g_fpsChoice = id - ID_FPS_FIRST; SaveSettings(); RestartReplayIfActive(); }
+        return;
+    }
+    if (id == ID_HOTKEYS)
+    {
+        g_panels.Open(std::make_unique<HotkeysPanel>(g_hotkeys, []
+        {
+            g_hotkeys.Save(g_settingsPath);       // الإجراءات
+            SceneHotkeysFromManager();            // المشاهد بتنحفظ مع المشاهد
+            SaveScenes();
+            g_hotkeys.Apply(g_hwnd);
+        }));
+        return;
+    }
+    if (id >= ID_OVERLAY_FIRST && id < ID_OVERLAY_FIRST + 5)
+    {
+        g_overlayCorner = id - ID_OVERLAY_FIRST;
+        SaveSettings();
         return;
     }
     if (id >= ID_AUDIO_TRACKS_FIRST && id < ID_AUDIO_TRACKS_FIRST + 2)
@@ -3553,10 +3770,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (g_activeScene < (int)g_scenes.size())
             g_appMixer.SetEntries(g_scenes[g_activeScene].apps);
         SetTimer(hwnd, TIMER_FRAME, 33, nullptr);
-        RegisterHotKey(hwnd, HOTKEY_RECORD, MOD_NOREPEAT, VK_F9);
-        RegisterHotKey(hwnd, HOTKEY_PAUSE,  MOD_NOREPEAT, VK_F10);
-        RegisterHotKey(hwnd, HOTKEY_STREAM, MOD_NOREPEAT, VK_F8);
-        RegisterHotKey(hwnd, HOTKEY_REPLAY, MOD_NOREPEAT, VK_F7);
+        SyncSceneHotkeys();         // اختصارات المشاهد
+        g_hotkeys.Apply(hwnd);
         LoadTargets();
         return 0;
     }
@@ -3565,6 +3780,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         ++g_tick;
         g_systemLevel = std::max(LevelToMeter(g_systemAudio.TakePeak()), g_systemLevel * 0.88f);
         g_micLevel    = std::max(LevelToMeter(g_micAudio.TakePeak()),    g_micLevel * 0.88f);
+        {
+            // مؤشر التسجيل الصغير (فوق الألعاب وسطح المكتب)
+            OverlayState os;
+            os.recording = g_recorder.IsRecording();
+            os.paused    = g_recorder.IsPaused();
+            os.streaming = g_streamer.IsActive();
+            os.elapsedMs = os.recording ? g_recorder.ElapsedMs() : (os.streaming ? g_streamer.ElapsedMs() : 0);
+            os.micOn     = g_micOn && g_micAudio.IsRunning();
+            os.micMuted  = g_micAudio.IsMuted();
+            os.micLevel  = g_micLevel;
+            os.replay      = g_replay.IsActive();
+            os.replaySaved = g_tick - g_replaySavedTick < 60;     // حوالي ثانيتين
+            os.monitor     = RecordedMonitor();
+            g_overlay.Update(os, g_overlayCorner, hwnd);
+        }
         g_appLevels.resize(g_appMixer.Count(), 0.0f);
         for (size_t i = 0; i < g_appLevels.size(); ++i)
             g_appLevels[i] = std::max(LevelToMeter(g_appMixer.TakePeak((int)i)), g_appLevels[i] * 0.88f);
@@ -3635,7 +3865,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (g_appVolDrag >= 0)
             g_appMixer.SetVolume(g_appVolDrag, VolumeAtX(g_appVolTrack, g_mouse.x));
         if (g_drag != Drag::None)
-            UpdateDrag(g_mouse, (wParam & MK_SHIFT) != 0, (GetKeyState(VK_CONTROL) & 0x8000) != 0);
+            UpdateDrag(g_mouse, (wParam & MK_SHIFT) != 0, (GetKeyState(VK_CONTROL) & 0x8000) != 0,
+                       (GetKeyState(VK_MENU) & 0x8000) != 0);
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
         TrackMouseEvent(&tme);
         return 0;
@@ -3856,6 +4087,29 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     }
 
+    // Alt (للقص): ويندوز عادةً بيفتح قائمة النافذة لما تترك Alt، منمنعه
+    // (Alt+F4 بيضل شغّال لأنه مفتاح تاني)
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+        // نافذة الاختصارات عم تستنى زر: بتاخد حتى Alt و F10
+        if (g_panels.WantsKeys())
+        {
+            if (msg == WM_SYSKEYDOWN)
+                g_panels.OnKey(wParam);
+            return 0;
+        }
+        if (wParam == VK_MENU)
+            return 0;
+        break;
+    case WM_SYSCHAR:
+        if (g_panels.WantsKeys())
+            return 0;          // بلا صوت "تنبيه" لما تكبس Alt + حرف
+        break;
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xFFF0) == SC_KEYMENU && lParam == 0)
+            return 0;
+        break;
+
     case WM_SETCURSOR:   // شكل الماوس حسب المكان
         if (LOWORD(lParam) == HTCLIENT && g_panels.IsOpen())
         {
@@ -3884,11 +4138,37 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_HOTKEY:
-        if (wParam == HOTKEY_RECORD) ToggleRecording();
-        if (wParam == HOTKEY_PAUSE)  TogglePause();
-        if (wParam == HOTKEY_STREAM) ToggleStreaming();
-        if (wParam == HOTKEY_REPLAY) SaveReplay();
+    {
+        const int slot = HotkeyManager::SlotFromId(wParam);
+        if (slot >= HK_COUNT)                     // اختصار مشهد
+        {
+            SwitchScene(slot - HK_COUNT);
+            return 0;
+        }
+        switch (slot)
+        {
+        case HK_RECORD:        ToggleRecording(); break;
+        case HK_PAUSE:         TogglePause(); break;
+        case HK_STREAM:        ToggleStreaming(); break;
+        case HK_REPLAY_SAVE:   SaveReplay(); break;
+        case HK_REPLAY_TOGGLE: if (g_replay.IsActive()) StopReplay(); else StartReplay(); break;
+        case HK_MIC_MUTE:
+            g_micAudio.SetMuted(!g_micAudio.IsMuted());
+            ShowMessage(g_micAudio.IsMuted() ? L"كُتم الميكروفون" : L"أُلغي كتم الميكروفون", false);
+            SaveSettings();
+            break;
+        case HK_NEXT_SCENE:
+            if (!g_scenes.empty())
+                SwitchScene((g_activeScene + 1) % (int)g_scenes.size());
+            break;
+        case HK_OVERLAY:
+            if (g_overlayCorner) { g_overlayLastCorner = g_overlayCorner; g_overlayCorner = 0; }
+            else                 g_overlayCorner = g_overlayLastCorner ? g_overlayLastCorner : 1;
+            SaveSettings();
+            break;
+        }
         return 0;
+    }
 
     case WM_STREAMER_DONE:   // البث (أو الإعادة) وقف لحالو (مشكلة بمشفّر الفيديو)
         if (lParam == 1)
@@ -3914,16 +4194,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_FRAME);
         SaveScenes();
-        UnregisterHotKey(hwnd, HOTKEY_RECORD);
-        UnregisterHotKey(hwnd, HOTKEY_PAUSE);
-        UnregisterHotKey(hwnd, HOTKEY_STREAM);
-        UnregisterHotKey(hwnd, HOTKEY_REPLAY);
+        g_hotkeys.UnregisterAll();
         g_streamer.Stop();
         g_replay.Stop();
         g_recorder.Stop();           // إذا سكّرت وهو عم يسجّل، منحفظ الملف أول
         g_systemAudio.Stop();
         g_micAudio.Stop();
         g_appMixer.Stop();
+        g_overlay.Destroy();
         PostQuitMessage(0);
         return 0;
     }

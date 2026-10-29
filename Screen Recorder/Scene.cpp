@@ -132,7 +132,7 @@ void Compositor::ComposeGdi(const std::vector<SceneLayer>& layers, int canvasW, 
         auto& grabber = m_grabbers[l.id];
         if (!grabber)
             grabber = std::make_unique<FrameGrabber>();
-        if (!grabber->Grab(l.target, m_dc, x, y, w, h, m_cursor) && p.lostIds)
+        if (!grabber->Grab(l.target, m_dc, x, y, w, h, m_cursor, l.cropL, l.cropT, l.cropR, l.cropB) && p.lostIds)
             p.lostIds->push_back(l.id);
     }
     GdiFlush();
@@ -191,13 +191,16 @@ void Compositor::DrawMediaGdi(const SceneLayer& l, int x, int y, int w, int h, s
         m.version = f->version;
     }
 
+    // القص (Alt + سحب) أول شي
+    int sx = (int)std::lround(m.w * l.cropL), sy = (int)std::lround(m.h * l.cropT);
+    int sw = std::max(1, (int)std::lround(m.w * (1 - l.cropL - l.cropR)));
+    int sh = std::max(1, (int)std::lround(m.h * (1 - l.cropT - l.cropB)));
     // الكاميرا: منقص لتملا المكان بدون مط
-    int sx = 0, sy = 0, sw = m.w, sh = m.h;
     if (l.kind == LayerKind::Camera)
     {
-        const double dstAspect = (double)w / h, srcAspect = (double)m.w / m.h;
-        if (srcAspect > dstAspect) { sw = (int)(m.h * dstAspect); sx = (m.w - sw) / 2; }
-        else                       { sh = (int)(m.w / dstAspect); sy = (m.h - sh) / 2; }
+        const double dstAspect = (double)w / h, srcAspect = (double)sw / sh;
+        if (srcAspect > dstAspect) { const int nw = (int)(sh * dstAspect); sx += (sw - nw) / 2; sw = nw; }
+        else                       { const int nh = (int)(sw / dstAspect); sy += (sh - nh) / 2; sh = nh; }
     }
 
     HRGN clip = nullptr;

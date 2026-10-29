@@ -2,6 +2,7 @@
 //  Capture.cpp
 // =============================================================
 #include "Capture.h"
+#include <cmath>
 #include <dwmapi.h>
 #include <cstdlib>
 #include <cwchar>
@@ -209,7 +210,8 @@ FrameGrabber::~FrameGrabber()
     ReleaseDC(nullptr, m_screen);
 }
 
-bool FrameGrabber::Grab(const CaptureTarget& t, HDC dst, int x, int y, int w, int h, bool drawCursor)
+bool FrameGrabber::Grab(const CaptureTarget& t, HDC dst, int x, int y, int w, int h, bool drawCursor,
+                        double cropL, double cropT, double cropR, double cropB)
 {
     if (w <= 0 || h <= 0)
         return true;
@@ -268,10 +270,22 @@ bool FrameGrabber::Grab(const CaptureTarget& t, HDC dst, int x, int y, int w, in
         drawCursor = drawCursor && !minimized;
     }
 
-    const int sw = src.right - src.left;
-    const int sh = src.bottom - src.top;
+    int sw = src.right - src.left;
+    int sh = src.bottom - src.top;
     if (sw <= 0 || sh <= 0)
         return true;
+
+    // القص: منآخد بس الجزء الباقي من المصدر
+    if (cropL > 0 || cropT > 0 || cropR > 0 || cropB > 0)
+    {
+        const int cx = (int)std::lround(sw * cropL), cy = (int)std::lround(sh * cropT);
+        const int cw = std::max(1, (int)std::lround(sw * (1 - cropL - cropR)));
+        const int ch = std::max(1, (int)std::lround(sh * (1 - cropT - cropB)));
+        sx += cx;  sy += cy;
+        src.left += cx;  src.top += cy;
+        src.right = src.left + cw;  src.bottom = src.top + ch;
+        sw = cw;  sh = ch;
+    }
 
     if (std::abs(sw - w) <= 1 && std::abs(sh - h) <= 1)
         BitBlt(dst, x, y, w, h, srcDC, sx, sy, SRCCOPY);

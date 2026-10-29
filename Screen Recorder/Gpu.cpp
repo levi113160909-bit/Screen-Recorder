@@ -240,13 +240,16 @@ struct GpuCompositor::Impl
         if (dw <= 0 || dh <= 0)
             return;
 
-        // الجزء اللي منرسمه من الصورة (الكاميرا: منقص لتملا المكان بدون مط)
-        float sx = 0, sy = 0, sw = (float)m.w, sh = (float)m.h;
+        // الجزء اللي منرسمه من الصورة: أول شي القص (Alt + سحب)،
+        // وبعدين الكاميرا منقصها لتملا المكان بدون مط
+        float sx = (float)(m.w * l.cropL), sy = (float)(m.h * l.cropT);
+        float sw = std::max(1.0f, (float)(m.w * (1 - l.cropL - l.cropR)));
+        float sh = std::max(1.0f, (float)(m.h * (1 - l.cropT - l.cropB)));
         if (l.kind == LayerKind::Camera)
         {
-            const float dstAspect = dw / dh, srcAspect = (float)m.w / m.h;
-            if (srcAspect > dstAspect) { sw = m.h * dstAspect; sx = (m.w - sw) / 2; }
-            else                       { sh = m.w / dstAspect; sy = (m.h - sh) / 2; }
+            const float dstAspect = dw / dh, srcAspect = sw / sh;
+            if (srcAspect > dstAspect) { const float nw = sh * dstAspect; sx += (sw - nw) / 2; sw = nw; }
+            else                       { const float nh = sw / dstAspect; sy += (sh - nh) / 2; sh = nh; }
         }
 
         const bool mirror = l.kind == LayerKind::Camera && l.mirror;
@@ -471,11 +474,14 @@ struct GpuCompositor::Impl
                     continue;
             }
 
+            // القص: الجزء الباقي من المصدر بس
+            const D2D1_RECT_F part = D2D1::RectF((float)(src->cacheW * l.cropL), (float)(src->cacheH * l.cropT),
+                                                 (float)(src->cacheW * (1 - l.cropR)), (float)(src->cacheH * (1 - l.cropB)));
             // تصغير كبير = فلتر أنعم (أبطأ شوي) ، غير هيك فلتر سريع
-            const float scale = (dst.right - dst.left) / src->cacheW;
+            const float scale = (dst.right - dst.left) / std::max(1.0f, part.right - part.left);
             dc->DrawBitmap(src->bitmap.Get(), &dst, 1.0f,
                            scale < 0.75f ? D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC : D2D1_INTERPOLATION_MODE_LINEAR,
-                           nullptr, nullptr);
+                           l.HasCrop() ? &part : nullptr, nullptr);
         }
 
         if (fading)

@@ -168,6 +168,9 @@
     <ClCompile Include="AppAudioPanel.cpp" />
     <ClCompile Include="IconCache.cpp" />
     <ClCompile Include="AddSourcePanel.cpp" />
+    <ClCompile Include="Overlay.cpp" />
+    <ClCompile Include="Hotkeys.cpp" />
+    <ClCompile Include="HotkeysPanel.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Recorder.h" />
@@ -189,6 +192,9 @@
     <ClInclude Include="AppAudioPanel.h" />
     <ClInclude Include="IconCache.h" />
     <ClInclude Include="AddSourcePanel.h" />
+    <ClInclude Include="Overlay.h" />
+    <ClInclude Include="Hotkeys.h" />
+    <ClInclude Include="HotkeysPanel.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="app.rc" />

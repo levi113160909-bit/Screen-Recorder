@@ -70,6 +70,7 @@ namespace Icon
     // أيقونات جديدة: منكتبها كأرقام لحتى ما تتخرّب وقت النسخ
     inline const wchar_t Refresh[] = { 0xE72C, 0 };   // تحديث / إعادة
     inline const wchar_t Undo[]    = { 0xE7A7, 0 };   // رجوع للافتراضي
+    inline const wchar_t Keyboard[] = { 0xE765, 0 };  // لوحة المفاتيح
 }
 
 // =============================================================

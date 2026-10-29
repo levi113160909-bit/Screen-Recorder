@@ -72,6 +72,15 @@
     <ClCompile Include="AddSourcePanel.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Overlay.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Hotkeys.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="HotkeysPanel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Recorder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -129,6 +138,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="AddSourcePanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Overlay.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Hotkeys.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="HotkeysPanel.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Recorder.h">
