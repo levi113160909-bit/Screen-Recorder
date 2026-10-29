@@ -1112,7 +1112,7 @@ void ShowLayerMenu(int id, POINT screenPt)
         visible = g_scene.layers[i].visible;
         copy = g_scene.layers[i];
     }
-    std::vector<std::wstring> items = { L"ملاءمة داخل اللوحة", L"تمديد لملء اللوحة", L"الحجم الأصلي", L"توسيط",
+    std::vector<std::wstring> items = { L"ملاءمة داخل الإطار", L"تمديد لملء الإطار", L"الحجم الأصلي", L"توسيط",
                                         L"", L"نقل إلى الأمام", L"نقل إلى الخلف",
                                         L"", visible ? L"إخفاء" : L"إظهار", L"حذف" };
     std::vector<int> codes(items.size(), -1);
@@ -3139,7 +3139,7 @@ void DrawPreview(const D2D1_RECT_F& area)
     g_rt->PopAxisAlignedClip();
 
     // تحت: الدقة • الإطارات • معدّل البت
-    const std::wstring summary = L"اللوحة: " + SizeText(cw, ch)
+    const std::wstring summary = L"الدقة: " + SizeText(cw, ch)
                                + L"  •  " + std::to_wstring(CurrentFps()) + L" إطار/ث"
                                + L"  •  " + MbpsText(CurrentBitrate()) + L" ميغابت/ث";
     Text(summary, g_fSmall.Get(), Rect(area.left + 16, area.bottom - 42, area.right - 16, area.bottom - 14),
@@ -3459,13 +3459,13 @@ float DrawSettingsPage(int page, float L, float top, float R)
         Locked();
         int pw, ph;
         PrimaryMonitorSize(pw, ph);
-        Option(L"دقة اللوحة", [&]
+        Option(L"دقة الفيديو", [&]
         {
             DrawSegmented(Rect(l, y, r, y + 34), { L"الشاشة", L"1440p", L"1080p", L"720p" }, g_canvasChoice, O + ID_CANVAS_FIRST, !locked);
             y += 40;
             Hint((g_canvasChoice == 0 ? L"بحجم الشاشة الرئيسية ← " + SizeText(pw & ~1, ph & ~1)
                                       : SizeText(CANVAS_H[g_canvasChoice] * 16 / 9, CANVAS_H[g_canvasChoice]))
-                 + L" • هي مساحة المشهد، ويُبث منها أيضًا");
+                 + L" • حجم الصورة التي تُسجَّل");
         });
         Option(L"معدّل الإطارات", [&]
         {
@@ -3615,9 +3615,9 @@ float DrawSettingsPage(int page, float L, float top, float R)
         const UINT32 sfps = StreamFps();
         Option(L"دقة البث", [&]
         {
-            DrawSegmented(Rect(l, y, r, y + 34), { L"مثل اللوحة", L"1080p", L"720p" }, g_streamRes, O + ID_STREAM_RES_FIRST, !live);
+            DrawSegmented(Rect(l, y, r, y + 34), { L"مثل التسجيل", L"1080p", L"720p" }, g_streamRes, O + ID_STREAM_RES_FIRST, !live);
             y += 40;
-            Hint(L"يُبث بدقة " + SizeText((int)sw, (int)sh) + L" (بنفس نسبة اللوحة)");
+            Hint(L"يُبث بدقة " + SizeText((int)sw, (int)sh) + L"");
         });
         Option(L"إطارات البث", [&]
         {
