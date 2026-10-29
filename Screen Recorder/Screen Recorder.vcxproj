@@ -178,6 +178,7 @@
     <ClCompile Include="GpuEncode.cpp" />
     <ClCompile Include="NvEnc.cpp" />
     <ClCompile Include="Bitstream.cpp" />
+    <ClCompile Include="TargetPanel.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Recorder.h" />
@@ -208,6 +209,7 @@
     <ClInclude Include="GpuEncode.h" />
     <ClInclude Include="NvEnc.h" />
     <ClInclude Include="Bitstream.h" />
+    <ClInclude Include="TargetPanel.h" />
     <ClInclude Include="nvEncodeAPI.h" />
   </ItemGroup>
   <ItemGroup>

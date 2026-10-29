@@ -19,6 +19,7 @@
 #include <mfapi.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <tuple>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -40,6 +41,7 @@
 #include "HotkeysPanel.h"
 #include "Tray.h"
 #include "ReplayPanel.h"
+#include "TargetPanel.h"
 #include "SettingsPanel.h"
 #include <shobjidl.h>
 #include <commdlg.h>
@@ -93,6 +95,7 @@ enum : int
     ID_FOLDER_CHANGE, ID_FOLDER_OPEN,     // مجلد التسجيلات
     ID_STREAM_FPS_FIRST    = 260,  // 3 خيارات (إطارات البث): مثل التسجيل ، 30 ، 60
     ID_STREAM_PRESET_FIRST = 264,  // 6 أرقام جاهزة لمعدّل بت البث (264..269)
+    ID_STREAM_SETTINGS     = 270,  // زر "إعدادات البث" بتبويب البث
     ID_LAYER_FIRST   = 1000,    // الطبقة رقم id = ID_LAYER_FIRST + id
     ID_EYE_FIRST     = 3000,
     ID_DELETE_FIRST  = 5000,
@@ -2322,8 +2325,9 @@ void SaveTargets()
     if (path.empty() || _wfopen_s(&f, path.c_str(), L"w, ccs=UTF-8") != 0 || !f)
         return;
     for (const StreamTarget& t : g_targets)
-        fwprintf(f, L"T\t%d\t%d\t%ls\t%ls\t%ls\t%d\n", (int)t.platform, t.enabled ? 1 : 0,
-                 Clean(t.name).c_str(), Clean(t.url).c_str(), ProtectText(t.key).c_str(), t.vertical ? 1 : 0);
+        fwprintf(f, L"T\t%d\t%d\t%ls\t%ls\t%ls\t%d\t%d\t%u\n", (int)t.platform, t.enabled ? 1 : 0,
+                 Clean(t.name).c_str(), Clean(t.url).c_str(), ProtectText(t.key).c_str(), t.vertical ? 1 : 0,
+                 t.codec, t.kbps);
     fclose(f);
 }
 
@@ -2350,6 +2354,9 @@ void LoadTargets()
         t.url      = p[4];
         t.key      = UnprotectText(p[5]);
         t.vertical = p.size() >= 7 && p[6] == L"1";
+        t.codec    = p.size() >= 8 ? std::clamp(_wtoi(p[7].c_str()), 0, 1) : 0;
+        t.kbps     = p.size() >= 9 ? (UINT32)std::clamp(_wtoi(p[8].c_str()), 0, 50000) : 0;
+        if (t.kbps && t.kbps < 1000) t.kbps = 1000;
         g_targets.push_back(t);
     }
     fclose(f);
@@ -2533,6 +2540,68 @@ void AddTarget(POINT pt)
     SaveTargets();
 }
 
+// معدّل البت الفعلي لمنصة ، والترميز (HEVC بس للمنصات اللي بتدعمه)
+UINT32 TargetKbps(const StreamTarget& t) { return t.kbps ? t.kbps : g_streamKbps; }
+bool   TargetHevc(const StreamTarget& t) { return t.codec == 1 && PlatformSupportsHevc(t.platform); }
+
+// المنصات المفعّلة اللي بتتشارك نفس النسخة المضغوطة مع المنصة رقم index
+std::wstring SharedWith(int index)
+{
+    std::wstring out;
+    if (index < 0 || index >= (int)g_targets.size())
+        return out;
+    const StreamTarget& a = g_targets[index];
+    for (int i = 0; i < (int)g_targets.size(); ++i)
+    {
+        const StreamTarget& b = g_targets[i];
+        if (i == index || !b.enabled || b.vertical != a.vertical || TargetHevc(b) != TargetHevc(a) || TargetKbps(b) != TargetKbps(a))
+            continue;
+        if (!out.empty()) out += L"، ";
+        out += b.name;
+    }
+    return out;
+}
+
+// مجموع الرفع (كيلوبت/ث) وكم نسخة منضغطة ، للمنصات المفعّلة
+void UploadEstimate(UINT32& totalKbps, int& encodes)
+{
+    totalKbps = 0;
+    std::vector<std::tuple<bool, bool, UINT32>> groups;
+    for (const StreamTarget& t : g_targets)
+    {
+        if (!t.enabled)
+            continue;
+        totalKbps += TargetKbps(t) + 160;            // فيديو + صوت
+        const auto key = std::make_tuple(t.vertical, TargetHevc(t), TargetKbps(t));
+        if (std::find(groups.begin(), groups.end(), key) == groups.end())
+            groups.push_back(key);
+    }
+    encodes = (int)groups.size();
+}
+
+void StreamSize(UINT32& w, UINT32& h);   // تحت
+
+void OpenTargetPanel(int index)
+{
+    TargetPanelHooks h;
+    h.target = [index]() -> StreamTarget* { return index < (int)g_targets.size() ? &g_targets[index] : nullptr; };
+    h.defaultKbps = [] { return g_streamKbps; };
+    h.format = [index](UINT32& w, UINT32& hh, UINT32& fps)
+    {
+        fps = StreamFps();
+        if (index < (int)g_targets.size() && g_targets[index].vertical)
+        {
+            w  = g_streamRes == 2 ? 720 : 1080;
+            hh = g_streamRes == 2 ? 1280 : 1920;
+        }
+        else
+            StreamSize(w, hh);
+    };
+    h.sharedWith = [index] { return SharedWith(index); };
+    h.changed = [] { SaveTargets(); };
+    g_panels.Open(std::make_unique<TargetPanel>(std::move(h)));
+}
+
 void ShowTargetMenu(int index, POINT pt)
 {
     if (index < 0 || index >= (int)g_targets.size())
@@ -2544,9 +2613,11 @@ void ShowTargetMenu(int index, POINT pt)
     }
     StreamTarget& t = g_targets[index];
     const int pick = ShowMenu({ L"مفتاح البث", L"عنوان الخادم", L"إعادة التسمية",
-                                t.vertical ? L"✓   بث عمودي (9:16)" : L"      بث عمودي (9:16)", L"", L"حذف الوجهة" }, -1, pt);
+                                t.vertical ? L"✓   بث عمودي (9:16)" : L"      بث عمودي (9:16)", L"", L"حذف الوجهة",
+                                L"", L"الترميز ومعدّل البت…" }, -1, pt);
     switch (pick)
     {
+    case 7: OpenTargetPanel(index); break;
     case 0: if (EditTargetKey(t)) SaveTargets(); break;
     case 1: if (EditTargetUrl(t)) SaveTargets(); break;
     case 2:
@@ -2646,6 +2717,8 @@ void StartStreaming()
         const std::wstring to = opt.targets.size() == 1 ? L"إلى " + opt.targets[0].name
                                                         : L"إلى " + std::to_wstring(opt.targets.size()) + L" منصات";
         ShowMessage(L"بدأ البث " + to, false);
+        if (!g_streamer.Warning().empty())
+            ShowMessage(g_streamer.Warning(), true);
         Notify(Glyph::Live, Theme::Red, L"بدأ البث المباشر", to);
     }
     else
@@ -2905,12 +2978,19 @@ void DrawTopBar(float W)
     {
         const int  live  = LiveCount();
         const D2D1_COLOR_F c = live > 0 ? D2D1::ColorF(0xFF3B5C) : Theme::Yellow;
-        const D2D1_RECT_F lp = Rect(312, 18, 492, 50);
+        double upKbps = 0;
+        for (const OutputStatus& st : g_streamStatus) upKbps += st.kbps;
+        wchar_t up[64];
+        swprintf_s(up, L"الرفع %.1f ميغابت/ث", upKbps / 1000.0);
+        const D2D1_RECT_F lp = Rect(312, 18, 652, 50);
         Fill(lp, WithAlpha(c, 0.16f), 16);
         if (live == 0 || (g_tick / 15) % 2 == 0)
             Circle(lp.right - 18, 34, 5, c);
         Text(live > 0 ? L"مباشر" : L"اتصال…", g_fSegment.Get(), Rect(lp.right - 80, lp.top, lp.right - 26, lp.bottom), c);
-        Text(FormatTime(g_streamer.ElapsedMs()), g_fSmallLtr.Get(), Rect(lp.left + 8, lp.top, lp.right - 84, lp.bottom), Theme::Text);
+        Text(FormatTime(g_streamer.ElapsedMs()), g_fSmallLtr.Get(), Rect(lp.right - 170, lp.top, lp.right - 84, lp.bottom), Theme::Text);
+        // الرفع اللحظي (مجموع كل المنصات)
+        Fill(Rect(lp.right - 176, lp.top + 8, lp.right - 175, lp.bottom - 8), WithAlpha(c, 0.4f));
+        Text(up, g_fSmall.Get(), Rect(lp.left + 12, lp.top, lp.right - 184, lp.bottom), live > 0 ? Theme::Green : Theme::SubText);
     }
 }
 
@@ -3051,8 +3131,9 @@ void DrawPreview(const D2D1_RECT_F& area)
                                + L"  •  " + MbpsText(CurrentBitrate()) + L" ميغابت/ث";
     Text(summary, g_fSmall.Get(), Rect(area.left + 16, area.bottom - 42, area.right - 16, area.bottom - 14),
          rec ? Theme::Text : Theme::SubText);
-    Text(L"اسحب للتحريك • المقابض لتغيير الحجم • Alt مع المقبض للقص • Ctrl بدون التصاق • الزر الأيمن للمزيد", g_fSmallEnd.Get(),
-         Rect(area.left + 16, area.bottom - 42, area.right - 16, area.bottom - 14), Theme::Off);
+    if (g_selectedLayer != 0)        // النصائح بس لما تختار طبقة (وقتها بتلزم)
+        Text(L"اسحب للتحريك • المقابض للحجم • Alt للقص • Ctrl بدون التصاق • الزر الأيمن للمزيد", g_fSmallEnd.Get(),
+             Rect(area.left + 16, area.bottom - 42, area.right - 16, area.bottom - 14), Theme::Off);
 }
 
 // ---------- سطر مصدر صوت ----------
@@ -3413,8 +3494,8 @@ float DrawSettingsPage(int page, float L, float top, float R)
             DrawSegmented(Rect(l, y, r, y + 34), { L"منخفضة", L"متوسطة", L"عالية", L"مخصّصة" }, g_quality, O + ID_QUALITY_FIRST, !locked);
             y += 42;
             const D2D1_RECT_F box   = Rect(l, y, r, y + 34);
-            const D2D1_RECT_F plus  = Rect(r - 40, y + 3, r - 3, y + 31);
-            const D2D1_RECT_F minus = Rect(l + 3, y + 3, l + 40, y + 31);
+            const D2D1_RECT_F plus  = Rect(l + 3, y + 3, l + 40, y + 31);     // + على اليسار (الأكبر لليسار)
+            const D2D1_RECT_F minus = Rect(r - 40, y + 3, r - 3, y + 31);
             Fill(box, Theme::Background, 9);
             if (AddHit(plus, O + ID_BITRATE_PLUS) && !locked)   Fill(plus, Theme::Hover, 7);
             if (AddHit(minus, O + ID_BITRATE_MINUS) && !locked) Fill(minus, Theme::Hover, 7);
@@ -3424,40 +3505,29 @@ float DrawSettingsPage(int page, float L, float top, float R)
             y += 40;
             Hint(L"الأعلى = صورة أوضح وملف أكبر");
         });
-        Option(L"المشفّر", [&]
-        {
-            const D2D1_RECT_F enc = Rect(l, y, r, y + 34);
-            Fill(enc, AddHit(enc, O + ID_ENCODER_MENU) && !locked ? Theme::Hover : Theme::Background, 9);
-            Text(EncoderLabel(), g_fBody.Get(), Rect(l + 34, y, r - 12, y + 34), locked ? Theme::SubText : Theme::Text);
-            Text(Icon::Chevron, g_fIcon.Get(), Rect(l + 4, y, l + 30, y + 34), Theme::SubText);
-            y += 40;
-            const bool gpu = g_previewCompositor.UsingGpu();
-            Hint(gpu ? L"محرّك التصوير: بطاقة الرسومات (Windows Graphics Capture)"
-                     : L"محرّك التصوير: الطريقة القديمة (GDI) — بطاقة الرسومات غير متاحة",
-                 gpu ? Theme::Green : Theme::Yellow);
-            if (g_recorder.IsRecording())
-                Hint(g_recorder.UsingGpuPath() ? L"⚡ الطريق السريع يعمل: التركيب والتحويل والضغط كلها على بطاقة الرسومات"
-                                               : L"الطريق العادي: الصورة تمرّ عبر الذاكرة والمعالج",
-                     g_recorder.UsingGpuPath() ? Theme::Green : Theme::SubText);
-            if (g_recorder.IsRecording() && g_recorder.UsingNvenc())
-                Hint(L"🟢 مشفّر NVIDIA المباشر: B-frames ونظر للأمام وجودة تكيّفية (مثل برنامج NVIDIA)", Theme::Green);
-            else if (!g_recorder.IsRecording() && g_encoderMode != 2)
-                Hint(L"⚡ يُستخدم الطريق السريع تلقائيًا عند التسجيل إن كانت بطاقتك تدعمه، ومع بطاقات NVIDIA يُستخدم مشفّرها مباشرةً");
-        });
-        Option(L"صيغة الضغط", [&]
+        Option(L"الترميز والمشفّر", [&]
         {
             DrawSegmented(Rect(l, y, r, y + 34), { L"H.264", L"HEVC (H.265)", L"AV1" }, g_codec, O + ID_CODEC_FIRST, !locked);
-            y += 40;
+            y += 42;
+            const D2D1_RECT_F enc = Rect(l, y, r, y + 34);
+            Fill(enc, AddHit(enc, O + ID_ENCODER_MENU) && !locked ? Theme::Hover : Theme::Background, 9);
+            Text(L"المشفّر: " + EncoderLabel(), g_fBody.Get(), Rect(l + 34, y, r - 12, y + 34), locked ? Theme::SubText : Theme::Text);
+            Text(Icon::Chevron, g_fIcon.Get(), Rect(l + 4, y, l + 30, y + 34), Theme::SubText);
+            y += 42;
             static const wchar_t* hints[] = {
-                L"الأكثر توافقًا: يعمل في كل البرامج والأجهزة",
-                L"أوضح بنفس الحجم (أو نفس الوضوح بحجم أصغر) — يحتاج بطاقة حديثة",
-                L"الأحدث والأفضل جودةً — RTX 40 أو RX 7000 أو Intel Arc" };
+                L"H.264: الأكثر توافقًا، يعمل في كل البرامج والأجهزة",
+                L"HEVC: أوضح بنفس الحجم • بعض برامج المونتاج القديمة لا تفتحه",
+                L"AV1: الأحدث والأفضل • يحتاج RTX 40 أو RX 7000 أو Intel Arc" };
             Hint(hints[g_codec]);
-            if (g_codec != 0)
-            {
-                Hint(L"إذا لم تدعمه بطاقتك يُستخدم H.264 تلقائيًا • بعض برامج المونتاج القديمة لا تفتحه", Theme::Yellow);
-                Hint(L"يُحفظ كملف MP4 عادي (ويندوز لا يدعم الملف الآمن مع هذه الصيغة): إذا تعطّل البرنامج قبل الإيقاف يضيع التسجيل", Theme::Yellow);
-            }
+            // الحالة: سطر واحد بس
+            if (g_recorder.IsRecording() && g_recorder.UsingNvenc())
+                Hint(L"يعمل الآن: مشفّر NVIDIA المباشر بأعلى إعدادات الجودة", Theme::Green);
+            else if (g_recorder.IsRecording())
+                Hint(L"يعمل الآن: " + g_recorder.EncoderName(), Theme::SubText);
+            else if (g_encoderMode != 2)
+                Hint(L"مع بطاقات NVIDIA يُستخدم مشفّرها مباشرةً بأعلى جودة، وإلا مشفّر ويندوز");
+            if (!g_previewCompositor.UsingGpu())
+                Hint(L"تنبيه: التصوير بالطريقة القديمة (GDI) لأن بطاقة الرسومات غير متاحة", Theme::Yellow);
         });
         break;
     }
@@ -3557,8 +3627,8 @@ float DrawSettingsPage(int page, float L, float top, float R)
             y += 42;
             // ضبط دقيق
             const D2D1_RECT_F box   = Rect(l, y, r, y + 34);
-            const D2D1_RECT_F plus  = Rect(r - 40, y + 3, r - 3, y + 31);
-            const D2D1_RECT_F minus = Rect(l + 3, y + 3, l + 40, y + 31);
+            const D2D1_RECT_F plus  = Rect(l + 3, y + 3, l + 40, y + 31);     // + على اليسار
+            const D2D1_RECT_F minus = Rect(r - 40, y + 3, r - 3, y + 31);
             Fill(box, Theme::Background, 9);
             if (AddHit(plus, O + ID_STREAM_KBPS_PLUS) && !live)   Fill(plus, Theme::Hover, 7);
             if (AddHit(minus, O + ID_STREAM_KBPS_MINUS) && !live) Fill(minus, Theme::Hover, 7);
@@ -3571,16 +3641,35 @@ float DrawSettingsPage(int page, float L, float top, float R)
             const bool hi = std::min(sw, sh) > 800;           // 1080p أو أكبر
             const wchar_t* rec = hi ? (sfps > 30 ? L"6000–9000" : L"4500–6000") : (sfps > 30 ? L"4500–6000" : L"3000–4500");
             Hint(std::wstring(L"المقترح لهذه الدقة والإطارات: ") + rec + L" • تويتش: 6000 كحد أقصى • يوتيوب يقبل أعلى");
-            int enabled = 0;
-            for (const StreamTarget& t : g_targets) if (t.enabled) ++enabled;
-            enabled = std::max(1, enabled);
-            Hint(L"سرعة الرفع اللازمة ≈ " + std::to_wstring((g_streamKbps + 160) * enabled * 12 / 10 / 1000 + 1) +
-                 L" ميغابت/ث" + (enabled > 1 ? L" (" + std::to_wstring(enabled) + L" منصات)" : std::wstring()) +
-                 L" • هذا منفصل تمامًا عن معدّل بت التسجيل");
+            Hint(L"هذا هو الإعداد العام للمنصات، ويمكن تخصيص كل منصة من قائمتها (⋯ ← الترميز ومعدّل البت)");
+            Hint(L"منفصل تمامًا عن معدّل بت التسجيل");
             if (g_streamer.IsActive() && g_streamer.UsingNvenc())
                 Hint(L"🟢 مشفّر NVIDIA المباشر: معدّل ثابت (CBR) ونظر للأمام وجودة تكيّفية", Theme::Green);
             else if (g_encoderMode != 2)
                 Hint(L"مع بطاقات NVIDIA يُستخدم مشفّرها مباشرةً بمعدّل ثابت (CBR) كما تطلب المنصات");
+        });
+        Option(L"مجموع استهلاك الرفع", [&]
+        {
+            UINT32 total = 0; int encodes = 0;
+            UploadEstimate(total, encodes);
+            if (g_targets.empty() || encodes == 0)
+            {
+                Hint(L"لا توجد منصات مفعّلة (أضفها من تبويب «البث»)");
+                return;
+            }
+            Text(LtrText(std::to_wstring((total + 999) / 1000)) + L" ميغابت/ث", g_fCenter.Get(), Rect(l, y, r, y + 30), Theme::Text);
+            y += 34;
+            Hint(L"اترك هامشًا: سرعة الرفع عندك يجب أن تكون ≈ " + LtrText(std::to_wstring(total * 14 / 10 / 1000 + 1)) +
+                 L" ميغابت/ث أو أكثر");
+            Hint(L"بطاقة الرسومات تضغط " + std::to_wstring(encodes) + (encodes == 1 ? L" نسخة واحدة" : L" نسخ") +
+                 L" • المنصات المتطابقة (نفس الاتجاه والترميز والمعدّل) تتشارك نسخة واحدة");
+            for (int i = 0; i < (int)g_targets.size(); ++i)
+            {
+                const StreamTarget& t = g_targets[i];
+                if (!t.enabled) continue;
+                Hint(L"• " + t.name + L": " + (TargetHevc(t) ? L"HEVC" : L"H.264") + L" • " +
+                     LtrText(std::to_wstring(TargetKbps(t))) + L" كيلوبت/ث" + (t.vertical ? L" • عمودي" : L""));
+            }
         });
         Option(L"البث العمودي (لتيك توك)", [&]
         {
@@ -3629,7 +3718,7 @@ void DrawStreamTab(const D2D1_RECT_F& side, float y)
     Fill(add, live ? Theme::Off : (AddHit(add, ID_ADD_TARGET) ? D2D1::ColorF(0x6A9DFF) : Theme::Accent), 8);
     Text(L"+  إضافة وجهة", g_fSegment.Get(), add, Theme::White);
 
-    const float settingsH = 262;
+    const float settingsH = 132;
     g_listRect = Rect(side.left + 8, y + 38, side.right - 8, side.bottom - settingsH);
 
     const float rowH = 62, gap = 6;
@@ -3689,7 +3778,9 @@ void DrawStreamTab(const D2D1_RECT_F& side, float y)
         else if (!t.enabled)          sub = L"معطّلة";
         else if (t.url.empty())      { sub = L"أدخل عنوان الخادم من القائمة"; subColor = Theme::Yellow; }
         else if (t.key.empty())      { sub = L"أدخل مفتاح البث من القائمة"; subColor = Theme::Yellow; }
-        else                          sub = L"جاهزة";
+        else
+            sub = L"جاهزة • " + std::wstring(TargetHevc(t) ? L"HEVC" : L"H.264") + L" • " +
+                  std::to_wstring(TargetKbps(t)) + (t.kbps ? L"" : L" (عام)");
         if (st)
             Circle(row.right - 64, row.top + 42, 4, dot);
         Text(sub, g_fSmall.Get(), Rect(row.left + 96, row.top + 32, row.right - (st ? 74.0f : 60.0f), row.top + 52), subColor);
@@ -3706,43 +3797,42 @@ void DrawStreamTab(const D2D1_RECT_F& side, float y)
     }
     g_rt->PopAxisAlignedClip();
 
-    // ---- إعدادات البث ----
+    // ---- ملخّص البث (الإعدادات نفسها بنافذة الإعدادات ← البث) ----
     float sy = side.bottom - settingsH;
     Fill(Rect(side.left + 16, sy + 4, side.right - 16, sy + 5), Theme::Border);
-    Text(L"دقة البث", g_fSection.Get(), Rect(L, sy + 12, R, sy + 34), Theme::SubText);
-    DrawSegmented(Rect(L, sy + 36, R, sy + 70), { L"اللوحة", L"1080p", L"720p" }, g_streamRes, ID_STREAM_RES_FIRST, !live);
+    Text(L"البث", g_fSection.Get(), Rect(L + 150, sy + 12, R, sy + 34), Theme::SubText);
+    const D2D1_RECT_F edit = Rect(L, sy + 10, L + 140, sy + 38);
+    const bool editHover = AddHit(edit, ID_STREAM_SETTINGS);
+    Fill(edit, editHover ? Theme::Hover : Theme::Card, 8);
+    Text(Icon::Settings, g_fIcon.Get(), Rect(edit.right - 30, edit.top, edit.right - 6, edit.bottom), Theme::SubText);
+    Text(L"إعدادات البث", g_fSegment.Get(), Rect(edit.left + 6, edit.top, edit.right - 30, edit.bottom), Theme::Text);
+
     UINT32 sw, sh;
     StreamSize(sw, sh);
-    Text(SizeText((int)sw, (int)sh) + L"  •  " + std::to_wstring(StreamFps()) + L" إطار/ث",
-         g_fSmall.Get(), Rect(L, sy + 72, R, sy + 90), Theme::SubText);
+    Text(SizeText((int)sw, (int)sh) + L"  •  " + std::to_wstring(StreamFps()) + L" إطار/ث  •  المعدّل العام " +
+         std::to_wstring(g_streamKbps), g_fSmall.Get(), Rect(L, sy + 46, R, sy + 66), Theme::SubText);
 
-    sy += 96;
-    Text(L"البث العمودي (لتيك توك)", g_fSection.Get(), Rect(L, sy, R, sy + 22), Theme::SubText);
-    sy += 24;
-    DrawSegmented(Rect(L, sy, R, sy + 34), { L"قصّ المنتصف", L"الشاشة كاملة" }, g_verticalMode, ID_VERTICAL_FIRST, !live);
-    sy += 42;
-    Text(L"معدّل البت", g_fSection.Get(), Rect(L, sy, R, sy + 22), Theme::SubText);
-    sy += 24;
-    const D2D1_RECT_F box   = Rect(L, sy, R, sy + 34);
-    const D2D1_RECT_F plus  = Rect(R - 40, sy + 3, R - 3, sy + 31);
-    const D2D1_RECT_F minus = Rect(L + 3, sy + 3, L + 40, sy + 31);
-    Fill(box, Theme::Card, 9);
-    if (AddHit(plus, ID_STREAM_KBPS_PLUS) && !live)   Fill(plus, Theme::Hover, 7);
-    if (AddHit(minus, ID_STREAM_KBPS_MINUS) && !live) Fill(minus, Theme::Hover, 7);
-    Text(L"+", g_fCenter.Get(), plus,  live ? Theme::Off : Theme::Text);
-    Text(L"−", g_fCenter.Get(), minus, live ? Theme::Off : Theme::Text);
-    Text(std::to_wstring(g_streamKbps) + L" كيلوبت/ث", g_fCenter.Get(), Rect(L + 44, sy, R - 44, sy + 34), Theme::Text);
-    sy += 38;
-
-    // تنبيه: كل منصة بتاخد نفس السرعة من النت
-    int enabled = 0;
-    for (const StreamTarget& t : g_targets) if (t.enabled) ++enabled;
+    // عدّاد الرفع: الفعلي وقت البث ، والمتوقّع قبله
     std::wstring hint;
-    if (enabled > 1)
-        hint = L"سرعة الرفع المطلوبة ≈ " + std::to_wstring((g_streamKbps + 160) * enabled / 1000 + 1) + L" ميغابت/ث (" + std::to_wstring(enabled) + L" منصات)";
+    if (live && !g_streamStatus.empty())
+    {
+        double now = 0;
+        for (const OutputStatus& st : g_streamStatus) now += st.kbps;
+        wchar_t buf[96];
+        swprintf_s(buf, L"الرفع الآن: %.1f ميغابت/ث", now / 1000.0);
+        hint = buf;
+    }
     else
-        hint = L"يوتيوب ينصح بـ 4500–9000 لـ 1080p";
-    Text(hint, g_fSmall.Get(), Rect(L, sy, R, sy + 18), Theme::SubText);
+    {
+        UINT32 total = 0; int encodes = 0;
+        UploadEstimate(total, encodes);
+        hint = encodes ? L"مجموع الرفع ≈ " + std::to_wstring((total + 999) / 1000) + L" ميغابت/ث" +
+                         (encodes > 1 ? L" • " + std::to_wstring(encodes) + L" نسخ مضغوطة" : std::wstring())
+                       : std::wstring(L"فعّل منصة واحدة على الأقل");
+    }
+    Text(hint, g_fSmall.Get(), Rect(L, sy + 68, R, sy + 88), live ? Theme::Green : Theme::SubText);
+    if (!live)
+        Text(L"إعدادات كل منصة من زر ⋯ بجانبها", g_fSmall.Get(), Rect(L, sy + 90, R, sy + 110), Theme::Off);
 }
 
 // ---------- الشريط الجانبي ----------
@@ -4432,6 +4522,7 @@ void OnClick(int id, D2D1_POINT_2F p)
     case ID_REPLAY_STOP:   StopReplay(); break;
     case ID_MIC_FILTERS:   ShowMicFilters(); break;
     case ID_STREAM:        ToggleStreaming(); break;
+    case ID_STREAM_SETTINGS: OpenSettings(SP_STREAM); break;
     case ID_ADD_TARGET:    AddTarget(screen); break;
     case ID_STREAM_KBPS_MINUS:
         if (!g_streamer.IsActive()) { ChangeStreamKbps(-1); SaveSettings(); }

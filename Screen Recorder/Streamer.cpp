@@ -251,9 +251,17 @@ void Streamer::Stop()
     if (!outputs->empty())
         std::thread([outputs] { outputs->clear(); }).detach();
 
-    for (auto& t : m_tracks)
-        t->Reset();
+    // تسكير المشفّرات والتصوير بالخلفية: لحتى الواجهة ما تعلق أبداً لو التعريف تأخّر
+    auto tracks = std::make_shared<std::vector<std::unique_ptr<Track>>>(std::move(m_tracks));
     m_tracks.clear();
+    if (!tracks->empty())
+        std::thread([tracks]
+        {
+            const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            for (auto& t : *tracks) t->Reset();
+            tracks->clear();
+            if (SUCCEEDED(hr)) CoUninitialize();
+        }).detach();
     m_audio.Shutdown();
     m_active = false;
 }
@@ -430,6 +438,12 @@ void Streamer::VideoThread(int t)
                 const LONGLONG ms = (next - now) / 10'000;
                 Sleep(ms >= 2 ? (DWORD)(ms - 1) : (ms >= 1 ? 1 : 0));
             }
+        }
+        // إنفيديا: منفضّي المشفّر قبل ما ينسكّر (إذا انسكّر وفيه إطارات ناطرة، التعريف ممكن يعلق)
+        if (track.nv)
+        {
+            std::vector<NvPacket> tail;
+            track.nv->Flush(tail);
         }
         timeEndPeriod(1);
     }
