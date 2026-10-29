@@ -5,7 +5,7 @@
 //  مستوى واحد بس: ما في نافذة جوّا نافذة.
 //
 //  الأقسام:
-//   - الفيديو، التسجيل، المؤشر والإشعارات، عام: بيرسمهم main.cpp
+//   - الفيديو، التسجيل، البث، المؤشر والإشعارات، عام: بيرسمهم main.cpp
 //     (لأنهم مربوطين بإعدادات البرنامج مباشرة)
 //   - الإعادة والاختصارات: صفحتين جاهزين (ReplayPanel و HotkeysPanel)
 // =============================================================
@@ -14,7 +14,7 @@
 
 enum SettingsPage : int
 {
-    SP_VIDEO = 0, SP_RECORDING, SP_REPLAY, SP_HOTKEYS, SP_OVERLAY, SP_GENERAL, SP_COUNT
+    SP_VIDEO = 0, SP_RECORDING, SP_STREAM, SP_REPLAY, SP_HOTKEYS, SP_OVERLAY, SP_GENERAL, SP_COUNT
 };
 
 // أرقام عناصر main.cpp جوّا نافذة الإعدادات = الرقم الأصلي + هالرقم

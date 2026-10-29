@@ -55,6 +55,9 @@ struct SceneLayer
 
     // القص (Alt + سحب المقبض): قديش منقص من كل طرف، كنسبة من المصدر (0..1)
     double        cropL = 0, cropT = 0, cropR = 0, cropB = 0;
+
+    // آخر حجم شفناه للنافذة (لحتى نلحقها إذا تغيّر حجمها، متل لعبة دخلت ملء الشاشة)
+    int           srcW = 0, srcH = 0;
     bool          HasCrop() const { return cropL > 0 || cropT > 0 || cropR > 0 || cropB > 0; }
 };
 

@@ -169,7 +169,8 @@ bool SameTarget(const CaptureTarget& a, const CaptureTarget& b)
 bool GetCaptureSize(const CaptureTarget& t, int& width, int& height)
 {
     RECT r = t.rect;
-    if (!t.isMonitor && (!IsWindow(t.hwnd) || !GetVisibleBounds(t.hwnd, r)))
+    // المصغّرة (متل لعبة ملء شاشة لما تطلع منها بـ Alt+Tab) حجمها مش حقيقي
+    if (!t.isMonitor && (!IsWindow(t.hwnd) || IsIconic(t.hwnd) || !GetVisibleBounds(t.hwnd, r)))
         return false;
     width  = r.right - r.left;
     height = r.bottom - r.top;

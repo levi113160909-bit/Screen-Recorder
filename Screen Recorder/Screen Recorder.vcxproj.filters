@@ -90,6 +90,15 @@
     <ClCompile Include="SettingsPanel.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="GpuEncode.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="NvEnc.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Bitstream.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Recorder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -165,6 +174,18 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SettingsPanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GpuEncode.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="NvEnc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Bitstream.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="nvEncodeAPI.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Recorder.h">

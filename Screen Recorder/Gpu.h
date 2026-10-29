@@ -29,6 +29,12 @@ public:
     // بيرجّع false إذا صار خطأ بكرت الشاشة (وقتها منرجع للطريقة القديمة)
     bool Compose(const std::vector<SceneLayer>& layers, int canvasW, int canvasH, const ComposeParams& params);
 
+    // الإطارات المتغيّرة: وصلت صورة جديدة (شاشة/نافذة/كاميرا) من آخر مرة؟
+    bool PollNewFrames(const std::vector<SceneLayer>& layers);
+
+    // جهاز Direct3D (للتسجيل السريع: التحويل والضغط على كرت الشاشة)
+    struct ID3D11Device* Device() const;
+
 private:
     GpuCompositor() = default;
     struct Impl;                    // التفاصيل مخبّاية بـ Gpu.cpp

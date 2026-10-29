@@ -26,10 +26,17 @@ struct EncodedPacket
 {
     bool                 video = true;
     bool                 keyframe = false;   // إطار كامل (منه بيقدر المشاهد يبلّش)
-    uint32_t             timeMs = 0;
+    uint32_t             timeMs = 0;         // فيديو: وقت فك الضغط (DTS)
+    int32_t              ctsMs = 0;          // فيديو: وقت العرض - وقت فك الضغط (مع B-frames)
+    bool                 hevc = false;       // فيديو HEVC (وإلا H.264)
     uint8_t              track = 0;          // فيديو: 0 = البث العادي ، 1 = العمودي
     std::vector<uint8_t> data;               // فيديو: NALUs بطول قبل كل وحدة (AVCC) ، صوت: AAC خام
 };
+
+// من مخرج مشفّر H.264 (Annex B) لقطعة جاهزة للبث (طول قبل كل وحدة) - بلا SPS/PPS
+// avcConfig: إذا فيها SPS/PPS منعبّي "بطاقة التعريف" (AVCDecoderConfigurationRecord)
+void AnnexBToPacket(const uint8_t* data, size_t size, LONGLONG time100ns, bool keyframe,
+                    EncodedPacket& pkt, std::vector<uint8_t>* avcConfig);
 
 // من صورة BGRA لصيغة NV12 (اللي بيفهمها مشفّر الفيديو)
 void BgraToNv12(const uint8_t* bgra, int width, int height, uint8_t* nv12);

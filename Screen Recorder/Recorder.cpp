@@ -3,11 +3,17 @@
 // =============================================================
 #include "Recorder.h"
 
+#include "GpuEncode.h"
+#include "NvEnc.h"
 #include <mmsystem.h>      // timeBeginPeriod: توقيت أدق
 #include <mfapi.h>
 #include <mfidl.h>
 #include <algorithm>
 #include <cstring>
+// إعدادات المشفّر (CODECAPI_...): initguid لحتى تنعرّف أرقامها هون
+#include <initguid.h>
+#include <codecapi.h>
+#include <strmif.h>       // ICodecAPI: منكلّم المشفّر مباشرة
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -31,52 +37,141 @@ namespace
         return t.QuadPart;
     }
 
-    // ---------------------------------------------------------
-    // منجهّز "الكاتب": ملف MP4 فيه فيديو H.264 + صوت AAC
-    // ---------------------------------------------------------
-    HRESULT CreateWriter(const std::wstring& path, UINT32 width, UINT32 height, UINT32 fps, UINT32 bitrate,
-                         int audioTracks, bool useHardware, bool crashSafe,
-                         IMFSinkWriter** ppWriter, DWORD* pVideo, std::vector<DWORD>* pAudio)
+    // AV1 (بالـ SDK القديم ما في اسم إله)
+    const GUID kAV1 = { FCC('AV01'), 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+
+    struct WriterConfig
     {
+        std::wstring          path;
+        UINT32                width = 0, height = 0, fps = 30, bitrate = 8'000'000;
+        int                   audioTracks = 0;
+        bool                  hardware = true, crashSafe = true;
+        VideoCodec            codec = VideoCodec::H264;
+        IMFDXGIDeviceManager* gpu = nullptr;      // موجود = الطريق السريع (الصور NV12 على كرت الشاشة)
+        bool                  tuned = true;       // إعدادات جودة إضافية للمشفّر
+        // موجود = الفيديو جاي مضغوط جاهز (من NVENC): منكتبه متل ما هو بلا مشفّر ويندوز
+        const std::vector<BYTE>* passthroughHeader = nullptr;
+    };
+
+    // ألوان الفيديو القياسية (BT.709 ، 16-235): متل كل الفيديوهات، فالمشغّلات بتعرضها صح
+    void SetVideoColors(IMFMediaType* t)
+    {
+        t->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+        t->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+        t->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+        t->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+    }
+
+    // ---------------------------------------------------------
+    // منجهّز "الكاتب": ملف MP4 فيه فيديو (H.264 / HEVC / AV1) + صوت AAC
+    // ---------------------------------------------------------
+    // آخر خطوة وصلها CreateWriter (لسجل التشخيص)
+    const wchar_t* g_writerStep = L"";
+    std::wstring   g_codecLog;          // شو قبل المشفّر من إعدادات الجودة
+
+    // منبعت إعدادات الجودة للمشفّر مباشرة (أضمن من تمريرها مع النوع: بعض المشفّرات بتتجاهلها هونيك)
+    void TuneEncoder(IMFSinkWriter* writer, DWORD stream, const WriterConfig& c)
+    {
+        ComPtr<ICodecAPI> api;
+        if (FAILED(writer->GetServiceForStream(stream, GUID_NULL, IID_PPV_ARGS(&api))))
+        {
+            g_codecLog += L"   المشفّر ما بيسمح بتعديل إعداداته\r\n";
+            return;
+        }
+        auto set = [&](const GUID& key, UINT32 value, const wchar_t* name)
+        {
+            VARIANT v; VariantInit(&v);
+            v.vt = VT_UI4; v.ulVal = value;
+            HRESULT hr = api->IsSupported(&key);
+            if (hr == S_OK) hr = api->SetValue(&key, &v);
+            else if (hr == S_FALSE) hr = E_NOTIMPL;
+            wchar_t buf[160];
+            swprintf_s(buf, L"   %s = %u  →  %s\r\n", name, value, SUCCEEDED(hr) ? L"✓" : L"✗ مرفوض");
+            g_codecLog += buf;
+        };
+        set(CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_PeakConstrainedVBR, L"نوع التحكم بالبت ريت");
+        set(CODECAPI_AVEncCommonMeanBitRate,     c.bitrate,                L"البت ريت");
+        set(CODECAPI_AVEncCommonMaxBitRate,      c.bitrate * 2,            L"أقصى بت ريت");
+        set(CODECAPI_AVEncCommonQualityVsSpeed,  85,                       L"الجودة مقابل السرعة");
+        set(CODECAPI_AVEncMPVGOPSize,            std::max<UINT32>(30, c.fps * 2), L"إطار كامل كل");
+        if (c.codec != VideoCodec::AV1)
+            set(CODECAPI_AVEncMPVDefaultBPictureCount, 2,                  L"B-frames");
+        set(CODECAPI_AVLowLatencyMode,           0,                        L"وضع التأخير المنخفض");
+    }
+
+    HRESULT CreateWriter(const WriterConfig& c, IMFSinkWriter** ppWriter, DWORD* pVideo, std::vector<DWORD>* pAudio)
+    {
+        g_writerStep = L"إنشاء الملف";
         ComPtr<IMFAttributes> attributes;
-        HRESULT hr = MFCreateAttributes(&attributes, 3);
+        HRESULT hr = MFCreateAttributes(&attributes, 4);
         // MP4 "مقطّع": بيكتب الفيديو على شكل قطع صغيرة، فإذا البرنامج ضرب
         // أو انطفى الجهاز بيضل كل شي قبلها شغّال
-        if (SUCCEEDED(hr) && crashSafe)
+        if (SUCCEEDED(hr) && c.crashSafe)
             hr = attributes->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_FMPEG4);
-        if (SUCCEEDED(hr)) hr = attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, useHardware);
+        if (SUCCEEDED(hr)) hr = attributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, c.hardware || c.gpu);
         if (SUCCEEDED(hr)) hr = attributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
+        if (SUCCEEDED(hr) && c.gpu)
+            hr = attributes->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, c.gpu);
 
         ComPtr<IMFSinkWriter> writer;
-        if (SUCCEEDED(hr)) hr = MFCreateSinkWriterFromURL(path.c_str(), nullptr, attributes.Get(), &writer);
+        if (SUCCEEDED(hr)) hr = MFCreateSinkWriterFromURL(c.path.c_str(), nullptr, attributes.Get(), &writer);
 
         // ---------- الفيديو ----------
+        const GUID subtype = c.codec == VideoCodec::HEVC ? MFVideoFormat_HEVC
+                           : c.codec == VideoCodec::AV1  ? kAV1 : MFVideoFormat_H264;
         ComPtr<IMFMediaType> vOut;
         if (SUCCEEDED(hr)) hr = MFCreateMediaType(&vOut);
         if (SUCCEEDED(hr)) hr = vOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        if (SUCCEEDED(hr)) hr = vOut->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-        if (SUCCEEDED(hr)) hr = vOut->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
+        if (SUCCEEDED(hr)) hr = vOut->SetGUID(MF_MT_SUBTYPE, subtype);
+        if (SUCCEEDED(hr)) hr = vOut->SetUINT32(MF_MT_AVG_BITRATE, c.bitrate);
         if (SUCCEEDED(hr)) hr = vOut->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        if (SUCCEEDED(hr)) hr = MFSetAttributeSize(vOut.Get(), MF_MT_FRAME_SIZE, width, height);
-        if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(vOut.Get(), MF_MT_FRAME_RATE, fps, 1);
+        if (SUCCEEDED(hr)) hr = MFSetAttributeSize(vOut.Get(), MF_MT_FRAME_SIZE, c.width, c.height);
+        if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(vOut.Get(), MF_MT_FRAME_RATE, c.fps, 1);
         if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(vOut.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+        // "High" بدل الافتراضي (Baseline): نفس معدّل البت بس صورة أوضح بكتير
+        if (SUCCEEDED(hr) && c.codec == VideoCodec::H264) hr = vOut->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+        if (SUCCEEDED(hr) && c.codec == VideoCodec::HEVC && c.tuned) hr = vOut->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH265VProfile_Main_420_8);
+        if (SUCCEEDED(hr)) SetVideoColors(vOut.Get());
+        if (SUCCEEDED(hr) && c.passthroughHeader)
+            hr = vOut->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER, c.passthroughHeader->data(), (UINT32)c.passthroughHeader->size());
         DWORD video = 0;
-        if (SUCCEEDED(hr)) hr = writer->AddStream(vOut.Get(), &video);
+        if (SUCCEEDED(hr)) { g_writerStep = L"إضافة مسار الفيديو (الحاوية ما قبلت الترميز؟)"; hr = writer->AddStream(vOut.Get(), &video); }
 
-        ComPtr<IMFMediaType> vIn;   // اللي منعطيه: صور RGB32 من تحت لفوق
+        // اللي منعطيه: الطريق السريع NV12 على كرت الشاشة ، وإلا صور RGB32 من تحت لفوق
+        ComPtr<IMFMediaType> vIn;
         if (SUCCEEDED(hr)) hr = MFCreateMediaType(&vIn);
         if (SUCCEEDED(hr)) hr = vIn->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        if (SUCCEEDED(hr)) hr = vIn->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+        if (SUCCEEDED(hr)) hr = vIn->SetGUID(MF_MT_SUBTYPE, c.gpu ? MFVideoFormat_NV12 : MFVideoFormat_RGB32);
         if (SUCCEEDED(hr)) hr = vIn->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-        if (SUCCEEDED(hr)) hr = vIn->SetUINT32(MF_MT_DEFAULT_STRIDE, (UINT32)(-(LONG)(width * 4)));
-        if (SUCCEEDED(hr)) hr = MFSetAttributeSize(vIn.Get(), MF_MT_FRAME_SIZE, width, height);
-        if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(vIn.Get(), MF_MT_FRAME_RATE, fps, 1);
+        if (SUCCEEDED(hr) && !c.gpu) hr = vIn->SetUINT32(MF_MT_DEFAULT_STRIDE, (UINT32)(-(LONG)(c.width * 4)));
+        if (SUCCEEDED(hr)) hr = MFSetAttributeSize(vIn.Get(), MF_MT_FRAME_SIZE, c.width, c.height);
+        if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(vIn.Get(), MF_MT_FRAME_RATE, c.fps, 1);
         if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(vIn.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-        if (SUCCEEDED(hr)) hr = writer->SetInputMediaType(video, vIn.Get(), nullptr);
+        if (SUCCEEDED(hr) && c.gpu) SetVideoColors(vIn.Get());
+
+        // إعدادات الجودة للمشفّر (متل NVIDIA): جودة متغيّرة بحد أعلى، أنواع إطارات أذكى،
+        // وأفضلية للجودة على السرعة. إذا المشفّر ما قبلها منجرّب بدونها (تحت)
+        ComPtr<IMFAttributes> enc;
+        if (SUCCEEDED(hr) && c.tuned)
+        {
+            MFCreateAttributes(&enc, 8);
+            enc->SetUINT32(CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_PeakConstrainedVBR);
+            enc->SetUINT32(CODECAPI_AVEncCommonMeanBitRate, c.bitrate);
+            enc->SetUINT32(CODECAPI_AVEncCommonMaxBitRate, c.bitrate * 2);
+            enc->SetUINT32(CODECAPI_AVEncCommonQualityVsSpeed, 85);
+            enc->SetUINT32(CODECAPI_AVEncMPVGOPSize, std::max<UINT32>(30, c.fps * 2));     // إطار كامل كل ثانيتين
+            if (c.codec != VideoCodec::AV1)
+                enc->SetUINT32(CODECAPI_AVEncMPVDefaultBPictureCount, 2);
+        }
+        if (SUCCEEDED(hr)) { g_writerStep = L"تجهيز المشفّر (ما في مشفّر قبل الصيغة)"; hr = c.passthroughHeader ? writer->SetInputMediaType(video, vOut.Get(), nullptr)      // مضغوط جاهز
+                                                                                  : writer->SetInputMediaType(video, vIn.Get(), enc.Get()); }
+        g_codecLog.clear();
+        if (SUCCEEDED(hr) && c.tuned && !c.passthroughHeader) TuneEncoder(writer.Get(), video, c);
 
         // ---------- الصوت (مسار أو أكتر، كلهم بنفس الإعدادات) ----------
         std::vector<DWORD> audioStreams;
-        for (int track = 0; track < audioTracks && SUCCEEDED(hr); ++track)
+        if (SUCCEEDED(hr)) g_writerStep = L"مسارات الصوت";
+        for (int track = 0; track < c.audioTracks && SUCCEEDED(hr); ++track)
         {
             DWORD audio = 0;
             ComPtr<IMFMediaType> aOut;   // AAC: 48000، ستيريو، 192 كيلوبت
@@ -102,7 +197,8 @@ namespace
             audioStreams.push_back(audio);
         }
 
-        if (SUCCEEDED(hr)) hr = writer->BeginWriting();
+        if (SUCCEEDED(hr)) { g_writerStep = L"بدء الكتابة"; hr = writer->BeginWriting(); }
+        if (SUCCEEDED(hr)) g_writerStep = L"تمام";
         if (SUCCEEDED(hr))
         {
             *ppWriter = writer.Detach();
@@ -180,6 +276,13 @@ std::vector<Recorder::EncoderInfo> Recorder::ListEncoders()
 // =============================================================
 //  البداية والنهاية
 // =============================================================
+Recorder::Recorder() = default;
+
+Recorder::~Recorder()
+{
+    Stop();
+}
+
 HRESULT Recorder::Start(const RecordOptions& options)
 {
     Stop();
@@ -199,28 +302,150 @@ HRESULT Recorder::Start(const RecordOptions& options)
     // المخلوط دايماً، ومسار لكل مصدر إذا طلبتهم (وفي أكتر من مصدر، وإلا ما في داعي)
     const int audioTracks = !m_hasAudio ? 0
                           : (m_opt.separateTracks && m_opt.audio.size() > 1 ? 1 + (int)m_opt.audio.size() : 1);
-    m_fps           = std::clamp<UINT32>(m_opt.fps, 1, 120);
+    m_fps           = std::clamp<UINT32>(m_opt.fps, 1, 240);
     m_frameDuration = ONE_SECOND / m_fps;
     const UINT32 bitrate = std::clamp<UINT32>(m_opt.bitrate, 500'000, 200'000'000);
 
-    // حسب نوع المشفّر المختار
+    // ---- المركّب (منجهّزه هون لحتى نعرف جهاز كرت الشاشة قبل ما نفتح الكاتب) ----
+    m_comp = std::make_unique<Compositor>(true);          // true = منرسم الماوس
+    m_pipe.reset();
     const bool tryHardware = (m_opt.encoder != EncoderMode::Software);
-    HRESULT hr = CreateWriter(m_opt.path, m_width, m_height, m_fps, bitrate, audioTracks, tryHardware, m_opt.crashSafe,
-                              &m_writer, &m_videoStream, &m_audioStreams);
-    if (FAILED(hr) && m_opt.encoder == EncoderMode::Auto)   // تلقائي: إذا كرت الشاشة ما زبط منجرّب المعالج
+    if (tryHardware && !m_opt.cpuPath && m_comp->EnsureGpu())
     {
+        // الطريق السريع: التحويل والضغط على كرت الشاشة
+        m_pipe = std::make_unique<GpuFramePipe>();
+        if (!m_pipe->Init(m_comp->GpuDevice(), m_width, m_height, m_fps))
+            m_pipe.reset();
+    }
+
+    // ---- منجرّب بالترتيب لحتى يزبط شي: ----
+    //  الطريق السريع ← الطريق العادي ، الترميز المختار ← H.264 ، مع إعدادات الجودة ← بدونها ، كرت الشاشة ← المعالج
+    struct Attempt { bool gpu; VideoCodec codec; bool tuned; bool hardware; bool fragmented; };
+    std::vector<Attempt> attempts;
+    std::vector<VideoCodec> codecs = { m_opt.codec };
+    if (m_opt.codec != VideoCodec::H264) codecs.push_back(VideoCodec::H264);
+    for (int gpu = (m_pipe ? 1 : 0); gpu >= 0; --gpu)
+        for (VideoCodec cdc : codecs)
+        {
+            // HEVC/AV1: ويندوز ما بيقبلهم بالـ MP4 المقطّع (بيفشل ببدء الكتابة 0xC00D36B4)، فمباشرة MP4 عادي
+            const bool frag = m_opt.crashSafe && cdc == VideoCodec::H264;
+            for (int tuned = 1; tuned >= 0; --tuned)
+                attempts.push_back({ gpu == 1, cdc, tuned == 1, tryHardware, frag });
+        }
+    if (m_opt.encoder == EncoderMode::Auto)                // تلقائي: آخر شي المعالج
+        for (VideoCodec cdc : codecs)
+            attempts.push_back({ false, cdc, true, false, m_opt.crashSafe && cdc == VideoCodec::H264 });
+
+    // سجل تشخيص: شو جرّبنا وشو صار (%LOCALAPPDATA%\ScreenRecorder\encoder_log.txt)
+    std::wstring log;
+    {
+        wchar_t buf[200];
+        swprintf_s(buf, L"الحجم %ux%u  الفريمات %u  البت ريت %u  الطريق السريع جاهز: %s\r\n",
+                   m_width, m_height, m_fps, bitrate, m_pipe ? L"نعم" : L"لا");
+        log += buf;
+    }
+
+    HRESULT hr = E_FAIL;
+    m_nvenc.reset();
+    m_videoOffset = 0;
+
+    // ---- أول شي: مشفّر إنفيديا المباشر (أعلى جودة) ----
+    //  H.264 مع "MP4 آمن": بلا B-frames (الملف الآمن ما بيدعمهم) بس مع Lookahead و AQ
+    //  HEVC أو MP4 عادي: كل شي (B-frames كمان)
+    if (m_pipe && tryHardware && m_opt.codec != VideoCodec::AV1)
+    {
+        const bool hevc = (m_opt.codec == VideoCodec::HEVC);
+        struct NvTry { int bframes; bool fragmented; };
+        std::vector<NvTry> tries;
+        if (m_opt.crashSafe && !hevc) tries.push_back({ 0, true });
+        tries.push_back({ 2, false });
+        for (const NvTry& t : tries)
+        {
+            auto nv = std::make_unique<NvencEncoder>();
+            if (!nv->Open(m_comp->GpuDevice(), hevc, m_width, m_height, m_fps, bitrate, t.bframes, log))
+                break;                                   // ما في NVENC: منكمّل بطريقة ويندوز
+            WriterConfig c;
+            c.path = m_opt.path; c.width = m_width; c.height = m_height; c.fps = m_fps; c.bitrate = bitrate;
+            c.audioTracks = audioTracks; c.hardware = true; c.crashSafe = t.fragmented;
+            c.codec = m_opt.codec; c.tuned = false;
+            c.passthroughHeader = &nv->SequenceHeader();
+            m_writer.Reset();
+            hr = CreateWriter(c, &m_writer, &m_videoStream, &m_audioStreams);
+            wchar_t buf[200];
+            swprintf_s(buf, L"NVENC مباشر | %s  →  0x%08X  (%s)\r\n",
+                       t.fragmented ? L"MP4 مقطّع" : L"MP4 عادي", (unsigned)hr, g_writerStep);
+            log += buf;
+            if (SUCCEEDED(hr))
+            {
+                m_videoOffset = nv->BFrames() * m_frameDuration;   // لحتى dts ما يكون سالب
+                m_nvenc = std::move(nv);
+                m_codecUsed = m_opt.codec;
+                break;
+            }
+            m_writer.Reset();
+            DeleteFileW(m_opt.path.c_str());
+        }
+    }
+
+    for (const Attempt& a : attempts)
+    {
+        if (m_nvenc) break;
+        WriterConfig c;
+        c.path = m_opt.path; c.width = m_width; c.height = m_height; c.fps = m_fps; c.bitrate = bitrate;
+        c.audioTracks = audioTracks; c.hardware = a.hardware; c.crashSafe = a.fragmented;
+        c.codec = a.codec; c.tuned = a.tuned;
+        c.gpu = a.gpu ? m_pipe->Manager() : nullptr;
         m_writer.Reset();
-        hr = CreateWriter(m_opt.path, m_width, m_height, m_fps, bitrate, audioTracks, false, m_opt.crashSafe,
-                          &m_writer, &m_videoStream, &m_audioStreams);
+        hr = CreateWriter(c, &m_writer, &m_videoStream, &m_audioStreams);
+        {
+            static const wchar_t* names[] = { L"H.264", L"HEVC", L"AV1" };
+            wchar_t buf[400];
+            swprintf_s(buf, L"%s | %s | %s | %s | %s  →  0x%08X  (%s)\r\n",
+                       names[(int)a.codec], a.gpu ? L"كرت الشاشة NV12" : L"عادي RGB",
+                       a.tuned ? L"مضبوط" : L"افتراضي", a.hardware ? L"هاردوير" : L"معالج",
+                       a.fragmented ? L"MP4 مقطّع" : L"MP4 عادي", (unsigned)hr, g_writerStep);
+            log += buf;
+            if (SUCCEEDED(hr)) log += g_codecLog;
+        }
+        if (SUCCEEDED(hr))
+        {
+            m_codecUsed = a.codec;
+            if (!a.gpu)
+                m_pipe.reset();                            // الطريق العادي
+            break;
+        }
+        DeleteFileW(m_opt.path.c_str());
+    }
+    {
+        wchar_t dir[MAX_PATH];
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH))
+        {
+            std::wstring folder = std::wstring(dir) + L"\\ScreenRecorder";
+            CreateDirectoryW(folder.c_str(), nullptr);
+            HANDLE h = CreateFileW((folder + L"\\encoder_log.txt").c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                                   nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                const BYTE bom[] = { 0xFF, 0xFE };
+                DWORD w = 0;
+                WriteFile(h, bom, 2, &w, nullptr);
+                WriteFile(h, log.data(), (DWORD)(log.size() * sizeof(wchar_t)), &w, nullptr);
+                CloseHandle(h);
+            }
+        }
     }
     if (FAILED(hr))
     {
         m_writer.Reset();
+        m_nvenc.reset();
+        m_pipe.reset();
+        m_comp.reset();
         DeleteFileW(m_opt.path.c_str());
         return hr;
     }
+    m_gpuPath = (m_pipe != nullptr);
 
-    m_encoderName = QueryEncoderName(m_writer.Get(), m_videoStream);
+    m_encoderName = m_nvenc ? std::wstring(L"NVIDIA NVENC (مباشر)") : QueryEncoderName(m_writer.Get(), m_videoStream);
 
     // الساعة
     LARGE_INTEGER f;
@@ -269,6 +494,9 @@ HRESULT Recorder::Stop()
         if (SUCCEEDED(hr)) hr = hrFinal;
         m_writer.Reset();
     }
+    m_nvenc.reset();
+    m_pipe.reset();          // بعد ما المشفّر خلص من الصور
+    m_comp.reset();
 
     m_active = false;
     m_paused = false;
@@ -309,7 +537,7 @@ LONGLONG Recorder::Elapsed100ns()
 // =============================================================
 //  الكتابة بالملف
 // =============================================================
-HRESULT Recorder::WriteVideo(const void* pixels, LONGLONG time)
+HRESULT Recorder::WriteVideo(const void* pixels, LONGLONG time, LONGLONG duration)
 {
     const DWORD bytes = (DWORD)m_width * m_height * 4;
     ComPtr<IMFMediaBuffer> buffer;
@@ -328,7 +556,7 @@ HRESULT Recorder::WriteVideo(const void* pixels, LONGLONG time)
     if (SUCCEEDED(hr)) hr = MFCreateSample(&sample);
     if (SUCCEEDED(hr)) hr = sample->AddBuffer(buffer.Get());
     if (SUCCEEDED(hr)) hr = sample->SetSampleTime(time);
-    if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(m_frameDuration);
+    if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(duration > 0 ? duration : m_frameDuration);
     if (SUCCEEDED(hr))
     {
         std::lock_guard<std::mutex> lock(m_writeMutex);
@@ -372,65 +600,185 @@ HRESULT Recorder::WriteAudio(DWORD stream, const float* pcm, size_t frames, LONG
 }
 
 // =============================================================
+//  إطار واحد: يا على كرت الشاشة (خانة NV12) يا بالذاكرة (RGB32)
+// =============================================================
+bool Recorder::ComposeFrame(const std::vector<SceneLayer>& layers, int canvasW, int canvasH, const FadeInfo& fade, Frame& f)
+{
+    ComposeParams cp;
+    cp.outW = m_width; cp.outH = m_height; cp.fade = fade;
+    if (m_pipe)
+    {
+        // الطريق السريع: المركّب بيرجّع الصورة على كرت الشاشة، ومنحوّلها هونيك لـ NV12
+        ID3D11Texture2D* tex = nullptr;
+        cp.gpuOnly = true;
+        cp.outTexture = &tex;
+        m_comp->Compose(layers, canvasW, canvasH, cp);
+        if (!tex)
+            return false;                         // صار خطأ بكرت الشاشة
+        f.slot  = m_pipe->Convert(tex);
+        f.valid = f.slot >= 0;                    // -1 = المشفّر متأخر: منترك هالإطار
+        return true;
+    }
+    f.cpu.resize((size_t)m_width * m_height * 4);
+    cp.out = f.cpu.data(); cp.stride = m_width * 4; cp.bottomUp = true;
+    m_comp->Compose(layers, canvasW, canvasH, cp);
+    f.valid = true;
+    return true;
+}
+
+HRESULT Recorder::WriteFrame(Frame& f, LONGLONG time, LONGLONG duration)
+{
+    if (!f.valid)
+        return S_OK;
+    f.valid = false;
+    if (!m_pipe)
+        return WriteVideo(f.cpu.data(), time, duration);
+    if (m_nvenc)
+    {
+        std::vector<NvPacket> packets;
+        const bool ok = m_nvenc->Encode(m_pipe->SlotTexture(f.slot), time, duration > 0 ? duration : m_frameDuration, packets);
+        m_pipe->Release(f.slot);                 // انتسخت للمشفّر: الخانة فاضية
+        f.slot = -1;
+        if (!ok)
+            return E_FAIL;
+        return WriteNvPackets(packets);
+    }
+
+    ComPtr<IMFSample> sample;
+    HRESULT hr = m_pipe->MakeSample(f.slot, &sample);
+    f.slot = -1;
+    if (SUCCEEDED(hr)) hr = sample->SetSampleTime(time);
+    if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(duration > 0 ? duration : m_frameDuration);
+    if (SUCCEEDED(hr))
+    {
+        std::lock_guard<std::mutex> lock(m_writeMutex);
+        hr = m_writer->WriteSample(m_videoStream, sample.Get());
+    }
+    return hr;
+}
+
+HRESULT Recorder::WriteNvPackets(std::vector<NvPacket>& packets)
+{
+    const bool bframes = m_nvenc && m_nvenc->BFrames() > 0;
+    for (NvPacket& p : packets)
+    {
+        ComPtr<IMFMediaBuffer> buffer;
+        HRESULT hr = MFCreateMemoryBuffer((DWORD)p.data.size(), &buffer);
+        BYTE* dest = nullptr;
+        if (SUCCEEDED(hr)) hr = buffer->Lock(&dest, nullptr, nullptr);
+        if (SUCCEEDED(hr))
+        {
+            memcpy(dest, p.data.data(), p.data.size());
+            buffer->Unlock();
+            hr = buffer->SetCurrentLength((DWORD)p.data.size());
+        }
+        ComPtr<IMFSample> sample;
+        if (SUCCEEDED(hr)) hr = MFCreateSample(&sample);
+        if (SUCCEEDED(hr)) hr = sample->AddBuffer(buffer.Get());
+        if (SUCCEEDED(hr)) hr = sample->SetSampleTime(p.pts + m_videoOffset);
+        if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(p.duration);
+        if (SUCCEEDED(hr)) hr = sample->SetUINT32(MFSampleExtension_CleanPoint, p.key ? TRUE : FALSE);
+        if (SUCCEEDED(hr) && bframes)            // ترتيب فك الضغط (مع B-frames بيختلف عن ترتيب العرض)
+            hr = sample->SetUINT64(MFSampleExtension_DecodeTimestamp, (UINT64)(p.dts + m_videoOffset));
+        if (SUCCEEDED(hr))
+        {
+            std::lock_guard<std::mutex> lock(m_writeMutex);
+            hr = m_writer->WriteSample(m_videoStream, sample.Get());
+        }
+        if (FAILED(hr))
+            return hr;
+    }
+    return S_OK;
+}
+
+void Recorder::DropFrame(Frame& f)
+{
+    if (m_pipe && f.slot >= 0)
+        m_pipe->Release(f.slot);
+    f.slot  = -1;
+    f.valid = false;
+}
+
+// =============================================================
 //  خيط الصورة
 // =============================================================
 void Recorder::VideoThread()
 {
     // WinRT (محرّك كرت الشاشة) بدها COM مفعّل بهالخيط
     const HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
-    // الصورة بالذاكرة: BGRA ، من تحت لفوق (متل ما بدها Media Foundation)
-    std::vector<BYTE> frame((size_t)m_width * m_height * 4);
     HRESULT hr = S_OK;
     bool endedByItself = false;
 
     {
-        Compositor compositor(true);           // true = منرسم الماوس
         std::vector<SceneLayer> layers;
         int canvasW = 0, canvasH = 0;
+        FadeInfo fade;
+        Frame frame;
 
         // تسخين: أول كم صورة من ويندوز بتاخد شوي وقت لتوصل
         for (int i = 0; i < 3; ++i)
         {
-            m_opt.scene->Snapshot(canvasW, canvasH, layers);
-            compositor.Compose(layers, canvasW, canvasH, frame.data(), m_width, m_height, m_width * 4, true);
+            m_opt.scene->Snapshot(canvasW, canvasH, layers, fade);
+            ComposeFrame(layers, canvasW, canvasH, fade, frame);
+            DropFrame(frame);
             Sleep(20);
         }
-        m_usingGpu = compositor.UsingGpu();
+        m_usingGpu = m_comp->UsingGpu();
 
-        LONGLONG last = -1;
         timeBeginPeriod(1);
-        while (m_running)
+        if (m_opt.variableFps)
+            VariableFpsLoop(hr, endedByItself);
+        else
         {
-            if (m_paused)               // إيقاف مؤقت: ما منكتب شي
+            LONGLONG last = -1;
+            while (m_running)
             {
-                Sleep(10);
-                continue;
+                if (m_paused)               // إيقاف مؤقت: ما منكتب شي
+                {
+                    Sleep(10);
+                    continue;
+                }
+                // نسخة من المشهد (يمكن المستخدم عم يحرّك الطبقات هلق)
+                m_opt.scene->Snapshot(canvasW, canvasH, layers, fade);
+                if (!ComposeFrame(layers, canvasW, canvasH, fade, frame))
+                {
+                    hr = E_FAIL;            // كرت الشاشة وقف (مثلاً تحديث التعريف)
+                    endedByItself = true;
+                    break;
+                }
+                m_usingGpu = m_comp->UsingGpu();
+
+                // الوقت على "الشبكة" بالضبط (0 ، 16.67 ، 33.33 ...) لحتى تطلع الحركة منتظمة
+                LONGLONG t = Elapsed100ns() / m_frameDuration * m_frameDuration;
+                if (last >= 0 && t <= last) t = last + m_frameDuration;
+                hr = WriteFrame(frame, t);
+                if (FAILED(hr))
+                {
+                    endedByItself = true;
+                    break;
+                }
+                last = t;
+
+                // منستنى لوقت الصورة الجاية بدقة: Sleep بيقرّب لتحت، فلو نمنا مرة وحدة
+                // منصحى قبل الوقت بشوي ومنكتب صورة زيادة ملزوقة بالجاية (تقطيع خفيف)
+                const LONGLONG next = t + m_frameDuration;
+                for (;;)
+                {
+                    const LONGLONG now = Elapsed100ns();
+                    if (now >= next || !m_running || m_paused) break;
+                    const LONGLONG ms = (next - now) / 10'000;
+                    Sleep(ms >= 2 ? (DWORD)(ms - 1) : (ms >= 1 ? 1 : 0));
+                }
             }
-
-            // نسخة من المشهد (يمكن المستخدم عم يحرّك الطبقات هلق)
-            // وإذا تغيّر حجم اللوحة منصغّرها/منكبّرها لحجم الفيديو
-            ComposeParams cp;
-            cp.out = frame.data(); cp.outW = m_width; cp.outH = m_height; cp.stride = m_width * 4; cp.bottomUp = true;
-            m_opt.scene->Snapshot(canvasW, canvasH, layers, cp.fade);
-            compositor.Compose(layers, canvasW, canvasH, cp);
-            m_usingGpu = compositor.UsingGpu();
-
-            LONGLONG t = Elapsed100ns();
-            if (t <= last) t = last + 1;
-            hr = WriteVideo(frame.data(), t);
-            if (FAILED(hr))
-            {
-                endedByItself = true;
-                break;
-            }
-            last = t;
-
-            // منستنى لوقت الصورة الجاية
-            const LONGLONG next = (t / m_frameDuration + 1) * m_frameDuration;
-            const LONGLONG now  = Elapsed100ns();
-            if (next > now)
-                Sleep((DWORD)((next - now) / 10'000));
+        }
+        DropFrame(frame);
+        if (m_nvenc)
+        {
+            // آخر الإطارات اللي لسا جوّا المشفّر (B-frames و lookahead)
+            std::vector<NvPacket> packets;
+            m_nvenc->Flush(packets);
+            const HRESULT hrTail = WriteNvPackets(packets);
+            if (SUCCEEDED(hr) && FAILED(hrTail) && !endedByItself) m_error = hrTail;
         }
         timeEndPeriod(1);
     }
@@ -497,4 +845,102 @@ void Recorder::AudioThread()
 
     if (SUCCEEDED(hrCom))
         CoUninitialize();
+}
+
+// =============================================================
+//  الإطارات المتغيّرة ("مثل اللعبة")
+//
+//  بدل صورة كل 1/fps ثانية، منستنى لحتى تجي صورة جديدة من ويندوز
+//  (اللعبة رسمت إطار) ومنكتبها بوقتها الحقيقي. فإذا اللعبة 85 إطار،
+//  الفيديو 85، وإذا طلعت 110 الفيديو 110: بلا تكرار وبلا تقطيع.
+//
+//  ملاحظة: ملف MP4 الآمن بيحسب الوقت من "مدة" كل إطار، فمنأخّر كل إطار
+//  لحتى يجي اللي بعده (لنعرف مدته بالضبط). يعني منحتفظ بإطار واحد بالانتظار.
+// =============================================================
+void Recorder::VariableFpsLoop(HRESULT& hr, bool& endedByItself)
+{
+    constexpr LONGLONG MAX_FPS   = 240;
+    const LONGLONG     minGap    = ONE_SECOND / MAX_FPS;      // ما منكتب أسرع من 240
+    const LONGLONG     keepAlive = ONE_SECOND / 10;           // الصورة واقفة: منكرّر كل 0.1 ثانية
+
+    Frame                   pending, current;                 // pending = ناطر مدته
+    LONGLONG                pendingTime = -1;
+    std::vector<SceneLayer> layers, prevLayers;
+    int                     canvasW = 0, canvasH = 0;
+    unsigned                prevFadeId = 0;
+    FadeInfo                fade;
+
+    // تغيّر شي بالمشهد نفسه؟ (حرّكت طبقة، أخفيت، قصّيت...)
+    auto layersChanged = [&]()
+    {
+        if (layers.size() != prevLayers.size())
+            return true;
+        for (size_t i = 0; i < layers.size(); ++i)
+        {
+            const SceneLayer& a = layers[i];
+            const SceneLayer& b = prevLayers[i];
+            if (a.id != b.id || a.visible != b.visible || a.x != b.x || a.y != b.y || a.w != b.w || a.h != b.h ||
+                a.cropL != b.cropL || a.cropT != b.cropT || a.cropR != b.cropR || a.cropB != b.cropB)
+                return true;
+        }
+        return false;
+    };
+
+    while (m_running)
+    {
+        if (m_paused)
+        {
+            Sleep(5);
+            continue;
+        }
+        m_opt.scene->Snapshot(canvasW, canvasH, layers, fade);
+
+        const LONGLONG now = Elapsed100ns();
+        if (pendingTime >= 0 && now - pendingTime < minGap)
+        {
+            Sleep(1);
+            continue;
+        }
+        const bool fading = fade.progress < 1 || fade.id != prevFadeId;
+        const bool fresh  = m_comp->PollNewFrames(layers) || fading || layersChanged() || pendingTime < 0;
+        if (!fresh && now - pendingTime < keepAlive)
+        {
+            Sleep(1);                    // ما في شي جديد: منستنى شوي
+            continue;
+        }
+
+        if (!ComposeFrame(layers, canvasW, canvasH, fade, current))
+        {
+            hr = E_FAIL;
+            endedByItself = true;
+            break;
+        }
+        m_usingGpu = m_comp->UsingGpu();
+        prevLayers = layers;
+        prevFadeId = fade.id;
+        if (!current.valid)
+            continue;                    // المشفّر متأخر: منترك هالإطار
+
+        LONGLONG t = Elapsed100ns();
+        if (t <= pendingTime) t = pendingTime + 1;
+
+        // هلق منعرف مدة الإطار اللي كان ناطر: منكتبه
+        if (pendingTime >= 0)
+        {
+            hr = WriteFrame(pending, pendingTime, t - pendingTime);
+            if (FAILED(hr))
+            {
+                endedByItself = true;
+                break;
+            }
+        }
+        std::swap(pending, current);     // الجديد صار هو الناطر
+        pendingTime = t;
+    }
+
+    // آخر إطار: مدته لحد هلق
+    if (pendingTime >= 0 && pending.valid && !endedByItself)
+        hr = WriteFrame(pending, pendingTime, std::max<LONGLONG>(minGap, Elapsed100ns() - pendingTime));
+    DropFrame(pending);
+    DropFrame(current);
 }

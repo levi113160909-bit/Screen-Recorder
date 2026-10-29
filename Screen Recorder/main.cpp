@@ -69,7 +69,9 @@ enum : int
     ID_STREAM, ID_ADD_TARGET, ID_STREAM_KBPS_MINUS, ID_STREAM_KBPS_PLUS,
     ID_REPLAY, ID_REPLAY_STOP, ID_MIC_FILTERS,
     ID_CANVAS_FIRST  = 90,      // 4 خيارات
-    ID_FPS_FIRST     = 100,     // 4 خيارات
+    ID_FPS_FIRST     = 100,     // سطر الأرقام الثابتة: 60 ، 75 ، 100 ، 120 ، 144 ، 165
+    ID_FPS_MODE_FIRST = 120,    // سطر الأوضاع: تلقائي ، 30 ، مثل اللعبة
+    ID_CODEC_FIRST    = 126,    // 3 خيارات: H.264 ، HEVC ، AV1
     ID_QUALITY_FIRST = 110,     // 4 خيارات
     ID_CONTAINER_FIRST = 130,   // خيارين
     ID_STREAM_RES_FIRST = 140,  // 3 خيارات (دقة البث)
@@ -89,6 +91,8 @@ enum : int
     ID_OVERAPP_SECOND   = 249,
 
     ID_FOLDER_CHANGE, ID_FOLDER_OPEN,     // مجلد التسجيلات
+    ID_STREAM_FPS_FIRST    = 260,  // 3 خيارات (إطارات البث): مثل التسجيل ، 30 ، 60
+    ID_STREAM_PRESET_FIRST = 264,  // 6 أرقام جاهزة لمعدّل بت البث (264..269)
     ID_LAYER_FIRST   = 1000,    // الطبقة رقم id = ID_LAYER_FIRST + id
     ID_EYE_FIRST     = 3000,
     ID_DELETE_FIRST  = 5000,
@@ -162,7 +166,10 @@ std::vector<StreamTarget> g_targets;            // كل الوجهات (المف
 std::vector<int>          g_liveTargets;        // أرقام الوجهات اللي عم نبث عليها هلق
 std::vector<OutputStatus> g_streamStatus;       // حالة كل وجهة شغّالة
 int                       g_streamRes  = 1;     // 0 = بحجم اللوحة ، 1 = 1080p ، 2 = 720p
-UINT32                    g_streamKbps = 6000;  // معدّل البت للبث (كيلوبت/ث)
+UINT32                    g_streamKbps = 6000;  // معدّل البت للبث (كيلوبت/ث) - منفصل عن التسجيل
+int                       g_streamFpsChoice = 0; // إطارات البث: 0 مثل التسجيل (حد 60) ، 1 = 30 ، 2 = 60
+const UINT32              STREAM_PRESETS[] = { 3000, 4500, 6000, 8000, 10000, 12000 };
+constexpr UINT32          STREAM_KBPS_MAX = 50000;
 int                       g_verticalMode = 0;   // البث العمودي: 0 قصّ المنتصف ، 1 الشاشة كاملة
 
 // الإعادة (آخر ثواني بالذاكرة)
@@ -204,8 +211,12 @@ int g_replaySavedTick = -1000;       // إمتى آخر مرة حفظنا إعا
 int g_tab  = 0;      // 0 = المصادر ، 1 = البث ، 2 = الإعدادات
 
 // -------- الإعدادات (بتنحفظ بملف settings.ini) --------
-const UINT32 FPS_OPTIONS[]    = { 0, 24, 30, 60 };          // 0 = تلقائي
-const float  QUALITY_BPP[]    = { 0.04f, 0.07f, 0.12f };   // بت لكل بكسل بكل إطار (منخفضة/متوسطة/عالية)
+// معدّل الإطارات: 0 تلقائي ، 1 = 30 ، 2..7 = 60 75 100 120 144 165 ، 8 = متغيّر "مثل اللعبة"
+// (المتغيّر: حتى 240، ومعدّل البت على أساس 120)
+const UINT32 FPS_OPTIONS[]    = { 0, 30, 60, 75, 100, 120, 144, 165, 120 };
+constexpr int FPS_VARIABLE   = 8;
+constexpr int FPS_FIXED_FIRST = 2;  // أول خيار بسطر الأرقام (60)
+const float  QUALITY_BPP[]    = { 0.06f, 0.11f, 0.20f };   // بت لكل بكسل بكل إطار (منخفضة/متوسطة/عالية)
 const int    CANVAS_H[]       = { 0, 1440, 1080, 720 };     // 0 = بحجم الشاشة الرئيسية
 int          g_canvasChoice   = 0;
 int          g_fpsChoice      = 0;
@@ -214,6 +225,7 @@ UINT32       g_customMbps     = 12;
 int          g_encoderMode    = 0;     // 0 تلقائي ، 1 بطاقة الرسومات ، 2 المعالج
 bool         g_crashSafe      = true;  // MP4 آمن (مقطّع)
 bool         g_separateTracks = false; // مسار صوت لكل مصدر (للمونتاج)
+int          g_codec          = 0;     // صيغة الضغط: 0 H.264 ، 1 HEVC ، 2 AV1
 int          g_overlayCorner  = 1;     // مؤشر التسجيل: 0 مخفي ، 1 أعلى اليمين ، 2 أعلى اليسار ، 3 أسفل اليمين ، 4 أسفل اليسار
 RecordingOverlay g_overlay;
 int          g_overlayLastCorner = 1;  // لما تخفيه بالاختصار ومنرجّعه، بيرجع لنفس الزاوية
@@ -1562,6 +1574,48 @@ bool LoadScenes()
     return true;
 }
 
+// النوافذ اللي تغيّر شكلها (مثلاً لعبة انتقلت لملء الشاشة، أو انضافت وهي مصغّرة):
+// إذا تغيّرت نسبة العرض للطول، منعدّل الطبقة لحتى ما تنمطّ الصورة
+// (منحافظ على العرض والمنتصف، وإذا طلعت أطول من اللوحة منصغّرها لتفوت)
+void FollowWindowAspect()
+{
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        const double cw = g_scene.canvasW, ch = g_scene.canvasH;
+        for (SceneLayer& l : g_scene.layers)
+        {
+            if (l.kind != LayerKind::Capture || l.target.isMonitor || l.lost || g_drag != Drag::None)
+                continue;
+            int w = 0, h = 0;
+            if (!GetCaptureSize(l.target, w, h) || w < 200 || h < 150)
+                continue;                       // مصغّرة أو حجم مش حقيقي
+            const bool first = (l.srcW == 0);
+            if (!first && w == l.srcW && h == l.srcH)
+                continue;
+            l.srcW = w;
+            l.srcH = h;
+            // النسبة الصحيحة (بعد القص) والنسبة الحالية للطبقة
+            const double want = (w * (1 - l.cropL - l.cropR)) / std::max(1.0, h * (1 - l.cropT - l.cropB));
+            const double have = l.w / std::max(1.0, l.h);
+            if (std::fabs(want / have - 1) < 0.03)
+                continue;                       // تقريباً نفسها
+            const double cx = l.x + l.w / 2, cy = l.y + l.h / 2;
+            double nw = l.w, nh = l.w / want;
+            if (nh > ch) { nh = ch; nw = nh * want; }
+            if (nw > cw) { nw = cw; nh = nw / want; }
+            l.w = nw;  l.h = nh;
+            l.x = cx - nw / 2;  l.y = cy - nh / 2;
+            changed = true;
+        }
+    }
+    if (changed)
+    {
+        g_previewValid = false;
+        SaveScenes();
+    }
+}
+
 // النوافذ المغلقة: إذا رجعت انفتحت منرجّع نربطها لحالها
 void ReconnectLostWindows()
 {
@@ -1587,6 +1641,10 @@ void ReconnectLostWindows()
 // =============================================================
 //  الإعدادات: الإطارات، معدّل البت، المشفّر
 // =============================================================
+UINT32 g_monitorHz = 0;      // تردد الشاشة اللي عم تتسجّل (بيتحدّث مع AutoFps)
+UINT32 AutoFps();
+UINT32 MonitorHz() { AutoFps(); return g_monitorHz; }
+
 UINT32 AutoFps()
 {
     // سؤال ويندوز عن التردد بطيء شوي، فمنحفظ الجواب ومنعيد السؤال كل ثانيتين
@@ -1608,6 +1666,7 @@ UINT32 AutoFps()
             }
     }
     const UINT32 hz = GetRefreshRate(probe);
+    g_monitorHz = hz;
     cached = hz >= 59 ? 60 : std::max<UINT32>(24, hz);   // أقصى شي 60
     return cached;
 }
@@ -1615,6 +1674,22 @@ UINT32 AutoFps()
 UINT32 CurrentFps()
 {
     return g_fpsChoice == 0 ? AutoFps() : FPS_OPTIONS[g_fpsChoice];
+}
+
+// إطارات البث (المنصات أقصى شي 60)
+UINT32 StreamFps()
+{
+    if (g_streamFpsChoice == 1) return 30;
+    if (g_streamFpsChoice == 2) return 60;
+    return std::min<UINT32>(CurrentFps(), 60);
+}
+
+// خطوة +/- لمعدّل بت البث
+void ChangeStreamKbps(int direction)
+{
+    const UINT32 step = g_streamKbps > 10000 || (direction > 0 && g_streamKbps >= 10000) ? 1000 : 500;
+    if (direction < 0) g_streamKbps = std::max<UINT32>(1000, g_streamKbps - step);
+    else               g_streamKbps = std::min<UINT32>(STREAM_KBPS_MAX, g_streamKbps + step);
 }
 
 // معدّل البت = العرض × الطول × الإطارات × (بت لكل بكسل حسب الجودة)
@@ -1726,13 +1801,14 @@ void SaveSettings()
         WritePrivateProfileStringW(L"Settings", key, v.c_str(), g_settingsPath.c_str());
     };
     put(L"Canvas",      std::to_wstring(g_canvasChoice));
-    put(L"FpsChoice",   std::to_wstring(g_fpsChoice));
+    put(L"FpsChoice2",  std::to_wstring(g_fpsChoice));
     put(L"Quality",     std::to_wstring(g_quality));
     put(L"CustomMbps",  std::to_wstring(g_customMbps));
     put(L"EncoderMode", std::to_wstring(g_encoderMode));
     put(L"EncoderName", g_encoderName);
     put(L"CrashSafe",   g_crashSafe ? L"1" : L"0");
     put(L"SeparateTracks", g_separateTracks ? L"1" : L"0");
+    put(L"Codec",          std::to_wstring(g_codec));
     put(L"OverlayCorner",  std::to_wstring(g_overlayCorner));
     put(L"CloseToTray",    g_closeToTray ? L"1" : L"0");
     put(L"Toasts",         g_toastsOn ? L"1" : L"0");
@@ -1749,6 +1825,7 @@ void SaveSettings()
     put(L"StreamRes",    std::to_wstring(g_streamRes));
     put(L"StreamKbps",   std::to_wstring(g_streamKbps));
     put(L"VerticalMode", std::to_wstring(g_verticalMode));
+    put(L"StreamFps",    std::to_wstring(g_streamFpsChoice));
     put(L"ReplayChoice", std::to_wstring(g_replaySet.seconds));
     put(L"ReplayOn",     g_replayWanted ? L"1" : L"0");
     put(L"ReplaySource", std::to_wstring(g_replaySet.source));
@@ -1798,13 +1875,21 @@ void LoadSettings()
         return std::wstring(buf);
     };
     g_canvasChoice = std::clamp(getInt(L"Canvas", 0), 0, 3);
-    g_fpsChoice    = std::clamp(getInt(L"FpsChoice", 0), 0, 3);
+    // الإعداد الجديد، وإذا ما في منحوّل القديم (تلقائي، 24، 30، 60، 120، متغيّر)
+    if (getInt(L"FpsChoice2", -1) >= 0)
+        g_fpsChoice = std::clamp(getInt(L"FpsChoice2", 0), 0, FPS_VARIABLE);
+    else
+    {
+        const int oldMap[] = { 0, 1, 1, 2, 5, FPS_VARIABLE };
+        g_fpsChoice = oldMap[std::clamp(getInt(L"FpsChoice", 0), 0, 5)];
+    }
     g_quality      = std::clamp(getInt(L"Quality", 2), 0, 3);
     g_customMbps   = (UINT32)std::clamp(getInt(L"CustomMbps", 12), 1, 150);
     g_encoderMode  = std::clamp(getInt(L"EncoderMode", 0), 0, 2);
     g_encoderName  = getStr(L"EncoderName");
     g_crashSafe    = getInt(L"CrashSafe", 1) != 0;
     g_separateTracks = getInt(L"SeparateTracks", 0) != 0;
+    g_codec          = std::clamp(getInt(L"Codec", 0), 0, 2);
     g_overlayCorner  = std::clamp(getInt(L"OverlayCorner", 1), 0, 4);
     g_closeToTray    = getInt(L"CloseToTray", 1) != 0;
     g_toastsOn       = getInt(L"Toasts", 1) != 0;
@@ -1820,7 +1905,8 @@ void LoadSettings()
     g_systemAudio.SetMuted(getInt(L"SystemMuted", 0) != 0);
     g_micAudio.SetMuted(getInt(L"MicMuted", 0) != 0);
     g_streamRes  = std::clamp(getInt(L"StreamRes", 1), 0, 2);
-    g_streamKbps = (UINT32)std::clamp(getInt(L"StreamKbps", 6000), 1000, 20000);
+    g_streamKbps = (UINT32)std::clamp(getInt(L"StreamKbps", 6000), 1000, (int)STREAM_KBPS_MAX);
+    g_streamFpsChoice = std::clamp(getInt(L"StreamFps", 0), 0, 2);
     g_verticalMode     = std::clamp(getInt(L"VerticalMode", 0), 0, 1);
     g_replaySet.seconds  = std::clamp(getInt(L"ReplayChoice", 1), 0, 3);
     g_replayWanted       = getInt(L"ReplayOn", 0) != 0;
@@ -2108,6 +2194,8 @@ void StartRecording()
     opt.encoder = (EncoderMode)g_encoderMode;
     opt.crashSafe = g_crashSafe;
     opt.separateTracks = g_separateTracks;
+    opt.variableFps    = (g_fpsChoice == FPS_VARIABLE);
+    opt.codec          = (VideoCodec)g_codec;
     if (g_systemOn && g_systemAudio.IsRunning()) opt.audio.push_back(&g_systemAudio);
     if (g_micOn && g_micAudio.IsRunning())       opt.audio.push_back(&g_micAudio);
     if (AnySceneHasApps())                       opt.audio.push_back(&g_appMixer.Output());
@@ -2117,8 +2205,13 @@ void StartRecording()
     {
         g_lastFile = opt.path;
         // إذا اخترت بطاقة رسومات معيّنة وويندوز استعمل غيرها منخبّرك
-        if (g_encoderMode == 1 && !g_encoderName.empty() && g_recorder.EncoderName() != g_encoderName)
+        static const wchar_t* codecNames[] = { L"H.264", L"HEVC", L"AV1" };
+        // منقارن الشركة بس (NVIDIA / AMD / Intel): نفس الكرت بيعطي اسم مختلف لكل صيغة (H.264 / HEVC)
+        auto vendor = [](const std::wstring& n) { return n.substr(0, n.find(L' ')); };
+        if (g_encoderMode == 1 && !g_encoderName.empty() && vendor(g_recorder.EncoderName()) != vendor(g_encoderName))
             ShowMessage(L"تعذّر استخدام " + g_encoderName + L" فاستُخدم " + g_recorder.EncoderName(), true);
+        else if ((int)g_recorder.CodecUsed() != g_codec)
+            ShowMessage(std::wstring(codecNames[g_codec]) + L" غير مدعوم على جهازك، فاستُخدم " + codecNames[(int)g_recorder.CodecUsed()], false);
         else
             ShowMessage(L"", false);
         Notify(Glyph::Record, Theme::Red, L"بدأ التسجيل", KeyHint(HK_RECORD, L"للإيقاف"));
@@ -2539,7 +2632,7 @@ void StartStreaming()
     opt.verticalW    = g_streamRes == 2 ? 720 : 1080;
     opt.verticalH    = g_streamRes == 2 ? 1280 : 1920;
     opt.verticalMode = g_verticalMode == 0 ? VerticalMode::Crop : VerticalMode::Fit;
-    opt.fps       = std::min<UINT32>(CurrentFps(), 60);
+    opt.fps       = StreamFps();
     opt.videoKbps = g_streamKbps;
     opt.encoder   = (EncoderMode)g_encoderMode;
     if (g_systemOn && g_systemAudio.IsRunning()) opt.audio.push_back(&g_systemAudio);
@@ -3281,10 +3374,39 @@ float DrawSettingsPage(int page, float L, float top, float R)
         });
         Option(L"معدّل الإطارات", [&]
         {
-            DrawSegmented(Rect(l, y, r, y + 34), { L"تلقائي", L"24", L"30", L"60" }, g_fpsChoice, O + ID_FPS_FIRST, !locked);
+            // سطر الأرقام (متل قائمة تردد الشاشة بويندوز)، وتحته الأوضاع
+            const int fixedSel = (g_fpsChoice >= FPS_FIXED_FIRST && g_fpsChoice < FPS_VARIABLE) ? g_fpsChoice - FPS_FIXED_FIRST : -1;
+            DrawSegmented(Rect(l, y, r, y + 34), { L"60", L"75", L"100", L"120", L"144", L"165" }, fixedSel, O + ID_FPS_FIRST, !locked);
             y += 40;
-            Hint(g_fpsChoice == 0 ? L"تلقائي: حسب تردد الشاشة ← " + std::to_wstring(CurrentFps()) + L" إطار/ث"
-                                  : std::wstring(L"عدد ثابت من الإطارات في الثانية"));
+            const int modeSel = g_fpsChoice == 0 ? 0 : (g_fpsChoice == 1 ? 1 : (g_fpsChoice == FPS_VARIABLE ? 2 : -1));
+            DrawSegmented(Rect(l, y, r, y + 34), { L"تلقائي", L"30", L"مثل اللعبة" }, modeSel, O + ID_FPS_MODE_FIRST, !locked);
+            y += 40;
+
+            const UINT32 hz = MonitorHz();
+            if (g_fpsChoice == FPS_VARIABLE)      // مثل اللعبة
+            {
+                Hint(L"يسجّل إطارًا فقط عندما تُظهر اللعبة إطارًا جديدًا — بلا تكرار ولا تقطيع", Theme::Green);
+                Hint(L"الأفضل: أضف نافذة اللعبة نفسها كمصدر بدل الشاشة كاملة");
+                Hint(L"برامج مثل Premiere قد لا تدعم هذا النوع؛ DaVinci وCapCut ويوتيوب تدعمه", Theme::Yellow);
+            }
+            else if (g_fpsChoice == 0)
+                Hint(L"تلقائي: حسب تردد الشاشة (حتى 60) ← " + std::to_wstring(CurrentFps()) + L" إطار/ث");
+            else
+            {
+                const UINT32 fps = FPS_OPTIONS[g_fpsChoice];
+                if (hz > 0 && fps > hz + 1)
+                    Hint(L"أعلى من تردد شاشتك (" + std::to_wstring(hz) + L" هرتز): ستتكرّر بعض الإطارات", Theme::Yellow);
+                else
+                    Hint(std::to_wstring(fps) + L" إطارًا ثابتًا في الثانية" + (hz ? L" • تردد شاشتك " + std::to_wstring(hz) + L" هرتز" : L""));
+                if (fps > 60)
+                {
+                    Hint(L"أكثر من 60 للتسجيل فقط — البث والإعادة حتى 60", Theme::Yellow);
+                    if (g_encoderMode == 2)
+                        Hint(L"يُفضَّل مشفّر بطاقة الرسومات، فالمعالج قد لا يلحق", Theme::Yellow);
+                    else
+                        Hint(L"إذا كانت اللعبة لا تثبت على هذا الرقم، جرّب «مثل اللعبة»");
+                }
+            }
         });
         Option(L"الجودة ومعدّل البت", [&]
         {
@@ -3313,6 +3435,29 @@ float DrawSettingsPage(int page, float L, float top, float R)
             Hint(gpu ? L"محرّك التصوير: بطاقة الرسومات (Windows Graphics Capture)"
                      : L"محرّك التصوير: الطريقة القديمة (GDI) — بطاقة الرسومات غير متاحة",
                  gpu ? Theme::Green : Theme::Yellow);
+            if (g_recorder.IsRecording())
+                Hint(g_recorder.UsingGpuPath() ? L"⚡ الطريق السريع يعمل: التركيب والتحويل والضغط كلها على بطاقة الرسومات"
+                                               : L"الطريق العادي: الصورة تمرّ عبر الذاكرة والمعالج",
+                     g_recorder.UsingGpuPath() ? Theme::Green : Theme::SubText);
+            if (g_recorder.IsRecording() && g_recorder.UsingNvenc())
+                Hint(L"🟢 مشفّر NVIDIA المباشر: B-frames ونظر للأمام وجودة تكيّفية (مثل برنامج NVIDIA)", Theme::Green);
+            else if (!g_recorder.IsRecording() && g_encoderMode != 2)
+                Hint(L"⚡ يُستخدم الطريق السريع تلقائيًا عند التسجيل إن كانت بطاقتك تدعمه، ومع بطاقات NVIDIA يُستخدم مشفّرها مباشرةً");
+        });
+        Option(L"صيغة الضغط", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"H.264", L"HEVC (H.265)", L"AV1" }, g_codec, O + ID_CODEC_FIRST, !locked);
+            y += 40;
+            static const wchar_t* hints[] = {
+                L"الأكثر توافقًا: يعمل في كل البرامج والأجهزة",
+                L"أوضح بنفس الحجم (أو نفس الوضوح بحجم أصغر) — يحتاج بطاقة حديثة",
+                L"الأحدث والأفضل جودةً — RTX 40 أو RX 7000 أو Intel Arc" };
+            Hint(hints[g_codec]);
+            if (g_codec != 0)
+            {
+                Hint(L"إذا لم تدعمه بطاقتك يُستخدم H.264 تلقائيًا • بعض برامج المونتاج القديمة لا تفتحه", Theme::Yellow);
+                Hint(L"يُحفظ كملف MP4 عادي (ويندوز لا يدعم الملف الآمن مع هذه الصيغة): إذا تعطّل البرنامج قبل الإيقاف يضيع التسجيل", Theme::Yellow);
+            }
         });
         break;
     }
@@ -3336,6 +3481,8 @@ float DrawSettingsPage(int page, float L, float top, float R)
             y += 40;
             Hint(g_crashSafe ? std::wstring(L"لا يضيع التسجيل إذا تعطّل البرنامج أو انقطعت الكهرباء")
                              : std::wstring(L"يضيع التسجيل كله إذا تعطّل البرنامج قبل الإيقاف"));
+            if (g_crashSafe && g_codec != 0)
+                Hint(L"الملف الآمن يعمل مع H.264 فقط؛ مع HEVC وAV1 يُحفظ كملف عادي", Theme::Yellow);
         });
         Option(L"مسارات الصوت", [&]
         {
@@ -3373,6 +3520,75 @@ float DrawSettingsPage(int page, float L, float top, float R)
                                   : std::wstring(L"تظهر فقط عندما يكون البرنامج مصغّرًا أو خلف نافذة أخرى"));
         });
         Hint(L"المؤشر والإشعارات لا يظهران في التسجيل ولا في البث", Theme::Green);
+        break;
+    }
+
+    case SP_STREAM:
+    {
+        const bool live = g_streamer.IsActive();
+        if (live)
+        {
+            Fill(Rect(L, y, R, y + 40), WithAlpha(Theme::Yellow, 0.12f), 10);
+            Text(L"لا يمكن تغيير إعدادات البث أثناء البث", g_fBody.Get(), Rect(L + 16, y, R - 16, y + 40), Theme::Yellow);
+            y += 50;
+        }
+        UINT32 sw, sh;
+        StreamSize(sw, sh);
+        const UINT32 sfps = StreamFps();
+        Option(L"دقة البث", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"مثل اللوحة", L"1080p", L"720p" }, g_streamRes, O + ID_STREAM_RES_FIRST, !live);
+            y += 40;
+            Hint(L"يُبث بدقة " + SizeText((int)sw, (int)sh) + L" (بنفس نسبة اللوحة)");
+        });
+        Option(L"إطارات البث", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"مثل التسجيل", L"30", L"60" }, g_streamFpsChoice, O + ID_STREAM_FPS_FIRST, !live);
+            y += 40;
+            Hint(std::to_wstring(sfps) + L" إطار/ث • 60 أنعم للألعاب لكنها تحتاج معدّل بت أعلى، و30 أفضل إذا كان الإنترنت ضعيفًا");
+        });
+        Option(L"معدّل البت للبث", [&]
+        {
+            int preset = -1;
+            for (int i = 0; i < 6; ++i)
+                if (STREAM_PRESETS[i] == g_streamKbps) preset = i;
+            DrawSegmented(Rect(l, y, r, y + 34), { L"3000", L"4500", L"6000", L"8000", L"10000", L"12000" },
+                          preset, O + ID_STREAM_PRESET_FIRST, !live);
+            y += 42;
+            // ضبط دقيق
+            const D2D1_RECT_F box   = Rect(l, y, r, y + 34);
+            const D2D1_RECT_F plus  = Rect(r - 40, y + 3, r - 3, y + 31);
+            const D2D1_RECT_F minus = Rect(l + 3, y + 3, l + 40, y + 31);
+            Fill(box, Theme::Background, 9);
+            if (AddHit(plus, O + ID_STREAM_KBPS_PLUS) && !live)   Fill(plus, Theme::Hover, 7);
+            if (AddHit(minus, O + ID_STREAM_KBPS_MINUS) && !live) Fill(minus, Theme::Hover, 7);
+            Text(L"+", g_fCenter.Get(), plus,  live ? Theme::Off : Theme::Text);
+            Text(L"−", g_fCenter.Get(), minus, live ? Theme::Off : Theme::Text);
+            Text(std::to_wstring(g_streamKbps) + L" كيلوبت/ث", g_fCenter.Get(), Rect(l + 44, y, r - 44, y + 34), Theme::Text);
+            y += 42;
+
+            // النصيحة حسب الدقة والإطارات
+            const bool hi = std::min(sw, sh) > 800;           // 1080p أو أكبر
+            const wchar_t* rec = hi ? (sfps > 30 ? L"6000–9000" : L"4500–6000") : (sfps > 30 ? L"4500–6000" : L"3000–4500");
+            Hint(std::wstring(L"المقترح لهذه الدقة والإطارات: ") + rec + L" • تويتش: 6000 كحد أقصى • يوتيوب يقبل أعلى");
+            int enabled = 0;
+            for (const StreamTarget& t : g_targets) if (t.enabled) ++enabled;
+            enabled = std::max(1, enabled);
+            Hint(L"سرعة الرفع اللازمة ≈ " + std::to_wstring((g_streamKbps + 160) * enabled * 12 / 10 / 1000 + 1) +
+                 L" ميغابت/ث" + (enabled > 1 ? L" (" + std::to_wstring(enabled) + L" منصات)" : std::wstring()) +
+                 L" • هذا منفصل تمامًا عن معدّل بت التسجيل");
+            if (g_streamer.IsActive() && g_streamer.UsingNvenc())
+                Hint(L"🟢 مشفّر NVIDIA المباشر: معدّل ثابت (CBR) ونظر للأمام وجودة تكيّفية", Theme::Green);
+            else if (g_encoderMode != 2)
+                Hint(L"مع بطاقات NVIDIA يُستخدم مشفّرها مباشرةً بمعدّل ثابت (CBR) كما تطلب المنصات");
+        });
+        Option(L"البث العمودي (لتيك توك)", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"قصّ المنتصف", L"الشاشة كاملة" }, g_verticalMode, O + ID_VERTICAL_FIRST, !live);
+            y += 40;
+            Hint(g_verticalMode == 0 ? std::wstring(L"يُقصّ جزء من المنتصف بطول الشاشة: الصورة كبيرة وواضحة")
+                                     : std::wstring(L"تظهر الشاشة كاملة في المنتصف وفوقها وتحتها أسود"));
+        });
         break;
     }
 
@@ -3497,7 +3713,7 @@ void DrawStreamTab(const D2D1_RECT_F& side, float y)
     DrawSegmented(Rect(L, sy + 36, R, sy + 70), { L"اللوحة", L"1080p", L"720p" }, g_streamRes, ID_STREAM_RES_FIRST, !live);
     UINT32 sw, sh;
     StreamSize(sw, sh);
-    Text(SizeText((int)sw, (int)sh) + L"  •  " + std::to_wstring(std::min<UINT32>(CurrentFps(), 60)) + L" إطار/ث",
+    Text(SizeText((int)sw, (int)sh) + L"  •  " + std::to_wstring(StreamFps()) + L" إطار/ث",
          g_fSmall.Get(), Rect(L, sy + 72, R, sy + 90), Theme::SubText);
 
     sy += 96;
@@ -4092,9 +4308,20 @@ void OnClick(int id, D2D1_POINT_2F p)
         if (!rec) { g_canvasChoice = id - ID_CANVAS_FIRST; ApplyCanvasChoice(); SaveSettings(); RestartReplayIfActive(); }
         return;
     }
-    if (id >= ID_FPS_FIRST && id < ID_FPS_FIRST + 4)
+    if (id >= ID_FPS_FIRST && id < ID_FPS_FIRST + 6)            // 60 .. 165
     {
-        if (!rec) { g_fpsChoice = id - ID_FPS_FIRST; SaveSettings(); RestartReplayIfActive(); }
+        if (!rec) { g_fpsChoice = FPS_FIXED_FIRST + (id - ID_FPS_FIRST); SaveSettings(); RestartReplayIfActive(); }
+        return;
+    }
+    if (id >= ID_CODEC_FIRST && id < ID_CODEC_FIRST + 3)
+    {
+        if (!rec) { g_codec = id - ID_CODEC_FIRST; SaveSettings(); }
+        return;
+    }
+    if (id >= ID_FPS_MODE_FIRST && id < ID_FPS_MODE_FIRST + 3)  // تلقائي ، 30 ، مثل اللعبة
+    {
+        const int modes[] = { 0, 1, FPS_VARIABLE };
+        if (!rec) { g_fpsChoice = modes[id - ID_FPS_MODE_FIRST]; SaveSettings(); RestartReplayIfActive(); }
         return;
     }
     if (id >= ID_STARTUP_FIRST && id < ID_STARTUP_FIRST + 2)
@@ -4173,6 +4400,16 @@ void OnClick(int id, D2D1_POINT_2F p)
         if (!g_streamer.IsActive()) { g_verticalMode = id - ID_VERTICAL_FIRST; SaveSettings(); }
         return;
     }
+    if (id >= ID_STREAM_FPS_FIRST && id < ID_STREAM_FPS_FIRST + 3)
+    {
+        if (!g_streamer.IsActive()) { g_streamFpsChoice = id - ID_STREAM_FPS_FIRST; SaveSettings(); }
+        return;
+    }
+    if (id >= ID_STREAM_PRESET_FIRST && id < ID_STREAM_PRESET_FIRST + 6)
+    {
+        if (!g_streamer.IsActive()) { g_streamKbps = STREAM_PRESETS[id - ID_STREAM_PRESET_FIRST]; SaveSettings(); }
+        return;
+    }
     if (id >= ID_STREAM_RES_FIRST && id < ID_STREAM_RES_FIRST + 3)
     {
         if (!g_streamer.IsActive()) { g_streamRes = id - ID_STREAM_RES_FIRST; SaveSettings(); }
@@ -4197,10 +4434,10 @@ void OnClick(int id, D2D1_POINT_2F p)
     case ID_STREAM:        ToggleStreaming(); break;
     case ID_ADD_TARGET:    AddTarget(screen); break;
     case ID_STREAM_KBPS_MINUS:
-        if (!g_streamer.IsActive()) { g_streamKbps = std::max<UINT32>(1000, g_streamKbps - 500); SaveSettings(); }
+        if (!g_streamer.IsActive()) { ChangeStreamKbps(-1); SaveSettings(); }
         break;
     case ID_STREAM_KBPS_PLUS:
-        if (!g_streamer.IsActive()) { g_streamKbps = std::min<UINT32>(20000, g_streamKbps + 500); SaveSettings(); }
+        if (!g_streamer.IsActive()) { ChangeStreamKbps(+1); SaveSettings(); }
         break;
     case ID_BITRATE_MINUS: if (!rec) { ChangeBitrate(-1); SaveSettings(); } break;
     case ID_BITRATE_PLUS:  if (!rec) { ChangeBitrate(+1); SaveSettings(); } break;
@@ -4299,6 +4536,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         {
             ReconnectLostWindows();
             g_appMixer.Reconnect();
+            FollowWindowAspect();
         }
         if (g_tick % 150 == 0 && g_drag == Drag::None)   // كل 5 ثواني منحفظ المشاهد
             SaveScenes();

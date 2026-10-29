@@ -19,6 +19,7 @@
 #include <mfreadwrite.h>
 #include <wrl/client.h>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -38,6 +39,14 @@ enum class EncoderMode
     Software    // المعالج (أبطأ بس بيشتغل بكل مكان)
 };
 
+// صيغة ضغط الفيديو
+enum class VideoCodec
+{
+    H264,   // الأكثر توافقًا (كل البرامج والأجهزة)
+    HEVC,   // H.265: أوضح بنفس الحجم (كروت الشاشة الحديثة)
+    AV1     // الأحدث والأفضل (RTX 40 / RX 7000 / Intel Arc)
+};
+
 struct RecordOptions
 {
     Scene*                    scene = nullptr;     // المشهد اللي منسجّله (بيقدر يتغيّر وقت التسجيل)
@@ -49,12 +58,18 @@ struct RecordOptions
     EncoderMode               encoder = EncoderMode::Auto;
     bool                      crashSafe = true;    // MP4 مقطّع: ما بيخرب إذا البرنامج ضرب
     bool                      separateTracks = false;   // مسار لكل مصدر صوت (بالإضافة للمخلوط)
+    // إطارات متغيّرة "مثل اللعبة": منكتب إطار بس لما تجي صورة جديدة (بوقتها الحقيقي)
+    // fps وقتها = الحد الأعلى (ومنه بيتحسب معدّل البت)
+    bool                      variableFps = false;
+    VideoCodec                codec = VideoCodec::H264;
+    bool                      cpuPath = false;     // إجبار الطريق العادي (للتجربة/المقارنة)
 };
 
 class Recorder
 {
 public:
-    ~Recorder() { Stop(); }
+    Recorder();
+    ~Recorder();      // بـ Recorder.cpp (لأن GpuFramePipe معرّف هونيك)
 
     HRESULT Start(const RecordOptions& options);
     HRESULT Stop();                       // بيوقف وبيحفظ الملف، وبيرجّع النتيجة
@@ -69,6 +84,12 @@ public:
 
     // هل التصوير شغّال على كرت الشاشة (الطريقة الحديثة)؟
     bool UsingGpuCapture() const { return m_usingGpu; }
+    // الطريق السريع (التحويل والضغط على كرت الشاشة بلا نسخ للذاكرة)؟
+    bool UsingGpuPath() const { return m_gpuPath; }
+    // مشفّر إنفيديا المباشر (B-frames + Lookahead + AQ)؟
+    bool UsingNvenc() const { return m_nvenc != nullptr; }
+    // الترميز اللي اشتغل فعلياً (إذا المختار ما زبط منرجع لـ H.264)
+    VideoCodec CodecUsed() const { return m_codecUsed; }
 
     // كل مشفّرات H.264 الموجودة بالجهاز
     struct EncoderInfo { std::wstring name; bool hardware; };
@@ -78,7 +99,22 @@ private:
     void     VideoThread();
     void     AudioThread();
     LONGLONG Elapsed100ns();              // الوقت المسجّل (بدون فترات الإيقاف المؤقت)
-    HRESULT  WriteVideo(const void* pixels, LONGLONG time);
+    HRESULT  WriteVideo(const void* pixels, LONGLONG time, LONGLONG duration = 0);
+
+    // إطار: يا خانة NV12 على كرت الشاشة (الطريق السريع)، يا صورة بالذاكرة
+    struct Frame { int slot = -1; std::vector<BYTE> cpu; bool valid = false; };
+    bool     ComposeFrame(const std::vector<SceneLayer>& layers, int canvasW, int canvasH, const FadeInfo& fade, Frame& f);
+    HRESULT  WriteFrame(Frame& f, LONGLONG time, LONGLONG duration = 0);
+    void     DropFrame(Frame& f);
+    void     VariableFpsLoop(HRESULT& hr, bool& endedByItself);
+
+    std::unique_ptr<Compositor>        m_comp;     // المركّب (منجهّزه بـ Start)
+    std::unique_ptr<class GpuFramePipe> m_pipe;    // الطريق السريع (فاضي = العادي)
+    std::unique_ptr<class NvencEncoder> m_nvenc;   // مشفّر إنفيديا المباشر (فاضي = مشفّر ويندوز)
+    LONGLONG                           m_videoOffset = 0;   // تأخير صغير للفيديو بسبب B-frames
+    HRESULT  WriteNvPackets(std::vector<struct NvPacket>& packets);
+    bool                               m_gpuPath = false;
+    VideoCodec                         m_codecUsed = VideoCodec::H264;
     HRESULT  WriteAudio(DWORD stream, const float* pcm, size_t frames, LONGLONG time);
 
     RecordOptions m_opt;

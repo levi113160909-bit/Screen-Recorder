@@ -175,6 +175,9 @@
     <ClCompile Include="Tray.cpp" />
     <ClCompile Include="ReplayPanel.cpp" />
     <ClCompile Include="SettingsPanel.cpp" />
+    <ClCompile Include="GpuEncode.cpp" />
+    <ClCompile Include="NvEnc.cpp" />
+    <ClCompile Include="Bitstream.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Recorder.h" />
@@ -202,6 +205,10 @@
     <ClInclude Include="Tray.h" />
     <ClInclude Include="ReplayPanel.h" />
     <ClInclude Include="SettingsPanel.h" />
+    <ClInclude Include="GpuEncode.h" />
+    <ClInclude Include="NvEnc.h" />
+    <ClInclude Include="Bitstream.h" />
+    <ClInclude Include="nvEncodeAPI.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="app.rc" />

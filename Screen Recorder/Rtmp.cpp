@@ -10,6 +10,7 @@
 // =============================================================
 #include "Net.h"            // لازم أول شي (winsock2 قبل windows.h)
 #include "Rtmp.h"
+#include "Bitstream.h"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -52,6 +53,14 @@ namespace
         Amf& PropNum(const std::string& k, double v)       { Key(k); return Num(v); }
         Amf& PropStr(const std::string& k, const std::string& v) { Key(k); return Str(v); }
         Amf& PropBool(const std::string& k, bool v)        { Key(k); return Bool(v); }
+        Amf& PropStrings(const std::string& k, const std::vector<std::string>& list)   // Strict Array
+        {
+            Key(k);
+            b.push_back(0x0A);
+            U32((uint32_t)list.size());
+            for (const std::string& s : list) Str(s);
+            return *this;
+        }
     };
 
     // قراءة AMF0 (اللي بيرجّعه السيرفر)
@@ -420,8 +429,10 @@ bool RtmpOutput::Session(std::wstring& error)
             .PropStr("type", "nonprivate")
             .PropStr("flashVer", "FMLE/3.0 (compatible; FMSc/1.0)")
             .PropStr("swfUrl", url.tcUrl)
-            .PropStr("tcUrl", url.tcUrl)
-            .End();
+            .PropStr("tcUrl", url.tcUrl);
+        if (m_info.hevc)
+            a.PropStrings("fourCcList", { "hvc1" });        // Enhanced RTMP: منخبّر الخادم إنو رح نبعت HEVC
+        a.End();
         if (!SendCommand(CS_COMMAND, 0, a.b) || !WaitForResult(1, nullptr, error, 10000))
         {
             if (error.empty()) error = L"رفض الخادم الاتصال";
@@ -469,7 +480,7 @@ bool RtmpOutput::Session(std::wstring& error)
             .PropNum("height", m_info.height)
             .PropNum("videodatarate", m_info.videoKbps)
             .PropNum("framerate", m_info.fps)
-            .PropNum("videocodecid", 7)
+            .PropNum("videocodecid", bs::FlvVideoCodecId(m_info.hevc))
             .PropNum("audiodatarate", m_info.audioKbps)
             .PropNum("audiosamplerate", 48000)
             .PropNum("audiosamplesize", 16)
@@ -585,18 +596,14 @@ bool RtmpOutput::SendPacket(const EncodedPacket& pkt)
                 m_haveBase = false;
                 return true;
             }
-            std::vector<uint8_t> h = { 0x17, 0x00, 0, 0, 0 };
-            h.insert(h.end(), cfg.begin(), cfg.end());
+            const std::vector<uint8_t> h = bs::FlvVideoHeader(m_info.hevc, cfg);
             if (!SendRtmp(CS_VIDEO, MSG_VIDEO, ts, m_streamId, h.data(), h.size()))
                 return false;
             m_videoHeaderSent = true;
         }
+        // H.264 بالطريقة القديمة ، أو HEVC بـ Enhanced RTMP. ctsMs = فرق B-frames
         std::vector<uint8_t> v;
-        v.reserve(pkt.data.size() + 5);
-        v.push_back(pkt.keyframe ? 0x17 : 0x27);
-        v.push_back(0x01);              // NALU
-        v.push_back(0); v.push_back(0); v.push_back(0);   // composition time (ما في B-frames)
-        v.insert(v.end(), pkt.data.begin(), pkt.data.end());
+        bs::FlvVideoFrame(m_info.hevc, pkt.keyframe, pkt.ctsMs, pkt.data.data(), pkt.data.size(), v);
         return SendRtmp(CS_VIDEO, MSG_VIDEO, ts, m_streamId, v.data(), v.size());
     }
 

@@ -5,6 +5,7 @@
 //   خيط الصوت : خلط المصادر -> AAC -> كل المنصات
 // =============================================================
 #include "Streamer.h"
+#include "Bitstream.h"
 #include <algorithm>
 #include <mmsystem.h>
 
@@ -15,6 +16,25 @@ namespace
     constexpr LONGLONG ONE_SECOND       = 10'000'000;
     constexpr size_t   AUDIO_LAG_FRAMES = AudioSource::SAMPLE_RATE / 10;   // 100ms
     constexpr size_t   AAC_FRAME        = 1024;
+
+    // سجل تشخيص (stream_log.txt / replay_log.txt بمجلد إعدادات البرنامج)
+    void WriteLog(const wchar_t* name, const std::wstring& text)
+    {
+        wchar_t dir[MAX_PATH];
+        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", dir, MAX_PATH))
+            return;
+        const std::wstring folder = std::wstring(dir) + L"\\ScreenRecorder";
+        CreateDirectoryW(folder.c_str(), nullptr);
+        HANDLE h = CreateFileW((folder + L"\\" + name).c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                               nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE)
+            return;
+        const BYTE bom[] = { 0xFF, 0xFE };
+        DWORD w = 0;
+        WriteFile(h, bom, 2, &w, nullptr);
+        WriteFile(h, text.data(), (DWORD)(text.size() * sizeof(wchar_t)), &w, nullptr);
+        CloseHandle(h);
+    }
 
     LONGLONG QpcNow()
     {
@@ -53,58 +73,134 @@ bool Streamer::Start(const StreamOptions& options, std::wstring& error)
         }
     }
 
-    // أي نسخ منحتاج: الأفقية (للمنصات العادية والإعادة) والعمودية (تيك توك)
-    bool needMain = m_opt.replay != nullptr, needVertical = false;
-    for (const StreamTarget& t : m_opt.targets)
-        (t.vertical ? needVertical : needMain) = true;
-
     const UINT32 fps = std::clamp<UINT32>(m_opt.fps, 10, 60);
     m_opt.fps = fps;
     m_frameDuration = ONE_SECOND / fps;
+    m_warning.clear();
 
-    m_tracks[0].active = needMain;
-    m_tracks[0].width  = std::max<UINT32>(64, m_opt.width & ~1u);
-    m_tracks[0].height = std::max<UINT32>(64, m_opt.height & ~1u);
-    m_tracks[1].active = needVertical;
-    m_tracks[1].width  = std::max<UINT32>(64, m_opt.verticalW & ~1u);
-    m_tracks[1].height = std::max<UINT32>(64, m_opt.verticalH & ~1u);
-
-    // المشفّرات
-    const bool tryHw = m_opt.encoder != EncoderMode::Software;
-    m_encoderName.clear();
-    for (int t = 0; t < 2; ++t)
+    // ---- النسخ: كل (اتجاه + ترميز + معدّل بت) مختلف = نسخة. المتطابقين بيتشاركوا ----
+    m_tracks.clear();
+    auto trackFor = [&](bool vertical, bool hevc, UINT32 kbps) -> int
     {
-        if (!m_tracks[t].active)
-            continue;
-        if (FAILED(m_tracks[t].encoder.Init(m_tracks[t].width, m_tracks[t].height, fps, m_opt.videoKbps, tryHw, true)))
+        for (size_t i = 0; i < m_tracks.size(); ++i)
+            if (m_tracks[i]->vertical == vertical && m_tracks[i]->hevc == hevc && m_tracks[i]->kbps == kbps)
+                return (int)i;
+        auto tr = std::make_unique<Track>();
+        tr->active   = true;
+        tr->vertical = vertical;
+        tr->hevc     = hevc;
+        tr->kbps     = kbps;
+        tr->width    = std::max<UINT32>(64, (vertical ? m_opt.verticalW : m_opt.width) & ~1u);
+        tr->height   = std::max<UINT32>(64, (vertical ? m_opt.verticalH : m_opt.height) & ~1u);
+        m_tracks.push_back(std::move(tr));
+        return (int)m_tracks.size() - 1;
+    };
+    if (m_opt.replay)
+        trackFor(false, false, m_opt.videoKbps);           // الإعادة: النسخة رقم 0 دايماً
+    std::vector<int> targetTrack;
+    for (const StreamTarget& t : m_opt.targets)
+    {
+        const UINT32 kbps = t.kbps ? t.kbps : m_opt.videoKbps;
+        const bool   hevc = t.codec == 1 && PlatformSupportsHevc(t.platform);
+        targetTrack.push_back(trackFor(t.vertical, hevc, kbps));
+    }
+
+    // ---- المشفّرات: أول شي إنفيديا المباشر (أعلى جودة)، وإلا مشفّر ويندوز (H.264) ----
+    const bool tryHw = m_opt.encoder != EncoderMode::Software;
+    const bool live  = !m_opt.isReplay;
+    m_encoderName.clear();
+    std::wstring diag;
+    {
+        wchar_t buf[160];
+        swprintf_s(buf, L"%s  %u إطار/ث  (%zu نسخة)\r\n", live ? L"البث" : L"الإعادة", fps, m_tracks.size());
+        diag += buf;
+    }
+    auto fail = [&](const std::wstring& why)
+    {
+        for (auto& x : m_tracks) x->Reset();
+        m_tracks.clear();
+        error = why;
+        WriteLog(live ? L"stream_log.txt" : L"replay_log.txt", diag);
+    };
+    for (size_t i = 0; i < m_tracks.size(); ++i)
+    {
+        Track& tr = *m_tracks[i];
+        wchar_t head[160];
+        swprintf_s(head, L"نسخة %zu: %s %ux%u  %s  %u كيلوبت/ث\r\n", i + 1, tr.vertical ? L"عمودية" : L"أفقية",
+                   tr.width, tr.height, tr.hevc ? L"HEVC" : L"H.264", tr.kbps);
+        diag += head;
+        if (tryHw)
         {
-            for (Track& tr : m_tracks) tr.encoder.Shutdown();
-            error = L"تعذّر تشغيل مشفّر الفيديو";
+            tr.comp = std::make_unique<Compositor>(true);
+            if (tr.comp->EnsureGpu())
+            {
+                tr.pipe = std::make_unique<GpuFramePipe>();
+                if (tr.pipe->Init(tr.comp->GpuDevice(), tr.width, tr.height, fps))
+                {
+                    tr.nv = std::make_unique<NvencEncoder>();
+                    // البث: معدّل ثابت + B-frames + نظر لقدّام 8 إطارات (تأخير بسيط)
+                    // الإعادة: معدّل متغيّر + 4 إطارات بلا B-frames (لحتى آخر لحظة تنحفظ لما تكبس)
+                    if (tr.nv->Open(tr.comp->GpuDevice(), tr.hevc, tr.width, tr.height, fps, tr.kbps * 1000,
+                                    live ? 2 : 0, diag, live, live ? 8 : 4))
+                    {
+                        const auto& seq = tr.nv->SequenceHeader();
+                        tr.nvConfig = tr.hevc ? bs::BuildHvcC(seq.data(), seq.size()) : bs::BuildAvcC(seq.data(), seq.size());
+                        tr.bframes = tr.nv->BFrames();
+                        tr.videoOffset = tr.bframes * m_frameDuration;
+                    }
+                    if (tr.nvConfig.empty())
+                        tr.nv.reset();
+                }
+            }
+            if (!tr.nv)
+            {
+                tr.pipe.reset();
+                tr.comp.reset();
+            }
+        }
+        if (tr.nv)
+        {
+            if (m_encoderName.empty())
+                m_encoderName = L"NVIDIA NVENC (مباشر)";
+            continue;
+        }
+        // مشفّر ويندوز بيعمل H.264 بس
+        if (tr.hevc)
+        {
+            tr.hevc = false;
+            m_warning = L"HEVC يحتاج بطاقة NVIDIA، فاستُخدم H.264";
+        }
+        diag += L"   ← مشفّر ويندوز H.264 (احتياط)\r\n";
+        if (FAILED(tr.encoder.Init(tr.width, tr.height, fps, tr.kbps, tryHw, true)))
+        {
+            fail(L"تعذّر تشغيل مشفّر الفيديو");
             return false;
         }
         if (m_encoderName.empty())
-            m_encoderName = m_tracks[t].encoder.Name();
+            m_encoderName = tr.encoder.Name();
     }
+    WriteLog(live ? L"stream_log.txt" : L"replay_log.txt", diag);
     if (FAILED(m_audio.Init(m_opt.audioKbps)))
     {
-        for (Track& tr : m_tracks) tr.encoder.Shutdown();
-        error = L"تعذّر تشغيل مشفّر الصوت";
+        fail(L"تعذّر تشغيل مشفّر الصوت");
         return false;
     }
 
-    // المُرسِلات: وحدة لكل منصة
-    m_shared = std::make_shared<Shared>();
+    // المُرسِلات: وحدة لكل منصة (بتاخد قطع النسخة تبعها)
+    m_shared = std::make_shared<Shared>(m_tracks.size());
     std::shared_ptr<Shared> shared = m_shared;
     m_outputs.clear();
     m_outputTrack.clear();
-    for (const StreamTarget& t : m_opt.targets)
+    for (size_t i = 0; i < m_opt.targets.size(); ++i)
     {
-        const int track = t.vertical ? 1 : 0;
+        const int track = targetTrack[i];
+        const Track& tr = *m_tracks[track];
         StreamInfo info;
-        info.width = m_tracks[track].width; info.height = m_tracks[track].height; info.fps = fps;
-        info.videoKbps = m_opt.videoKbps; info.audioKbps = m_opt.audioKbps;
+        info.width = tr.width; info.height = tr.height; info.fps = fps;
+        info.videoKbps = tr.kbps; info.audioKbps = m_opt.audioKbps;
+        info.hevc = tr.hevc;
         m_outputs.push_back(std::make_unique<RtmpOutput>(
-            t, info,
+            m_opt.targets[i], info,
             [shared, track] { std::lock_guard<std::mutex> lock(shared->mutex); return shared->avcConfig[track]; },
             [shared, track] { shared->forceKeyframe[track] = true; }));
         m_outputTrack.push_back(track);
@@ -128,9 +224,8 @@ bool Streamer::Start(const StreamOptions& options, std::wstring& error)
     m_active  = true;
     for (auto& o : m_outputs)
         o->Start();
-    for (int t = 0; t < 2; ++t)
-        if (m_tracks[t].active)
-            m_tracks[t].thread = std::thread(&Streamer::VideoThread, this, t);
+    for (size_t t = 0; t < m_tracks.size(); ++t)
+        m_tracks[t]->thread = std::thread(&Streamer::VideoThread, this, (int)t);
     m_audioThread = std::thread(&Streamer::AudioThread, this);
     return true;
 }
@@ -140,8 +235,8 @@ void Streamer::Stop()
     if (!m_active)
         return;
     m_running = false;
-    for (Track& t : m_tracks)
-        if (t.thread.joinable()) t.thread.join();
+    for (auto& t : m_tracks)
+        if (t->thread.joinable()) t->thread.join();
     if (m_audioThread.joinable()) m_audioThread.join();
 
     for (size_t i = 0; i < m_opt.audio.size() && i < m_taps.size(); ++i)
@@ -156,11 +251,9 @@ void Streamer::Stop()
     if (!outputs->empty())
         std::thread([outputs] { outputs->clear(); }).detach();
 
-    for (Track& t : m_tracks)
-    {
-        t.encoder.Shutdown();
-        t.active = false;
-    }
+    for (auto& t : m_tracks)
+        t->Reset();
+    m_tracks.clear();
     m_audio.Shutdown();
     m_active = false;
 }
@@ -209,7 +302,7 @@ void Streamer::VideoThread(int t)
 {
     const HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
-    Track& track = m_tracks[t];
+    Track& track = *m_tracks[t];
     const UINT32 W = track.width, H = track.height;
     std::vector<BYTE>    frame((size_t)W * H * 4);
     std::vector<uint8_t> nv12((size_t)W * H * 3 / 2);
@@ -217,7 +310,10 @@ void Streamer::VideoThread(int t)
     bool failed = false;
 
     {
-        Compositor compositor(true);
+        std::unique_ptr<Compositor> ownCompositor;
+        if (!track.comp)
+            ownCompositor = std::make_unique<Compositor>(true);
+        Compositor& compositor = track.comp ? *track.comp : *ownCompositor;
         std::vector<SceneLayer> layers;
         int canvasW = 0, canvasH = 0;
 
@@ -230,7 +326,7 @@ void Streamer::VideoThread(int t)
             m_opt.scene->Snapshot(canvasW, canvasH, layers, cp.fade);
 
             // النسخة العمودية: أي جزء من اللوحة منعرض
-            if (t == 1 && canvasW > 0 && canvasH > 0)
+            if (track.vertical && canvasW > 0 && canvasH > 0)
             {
                 const double aspect = (double)W / H;                 // 9/16
                 const double canvasAspect = (double)canvasW / canvasH;
@@ -252,18 +348,63 @@ void Streamer::VideoThread(int t)
                 cp.viewY = (canvasH - cp.viewH) / 2;
             }
 
-            compositor.Compose(layers, canvasW, canvasH, cp);
-            BgraToNv12(frame.data(), (int)W, (int)H, nv12.data());
-
-            LONGLONG now100 = Elapsed100ns();
-            if (now100 <= last) now100 = last + 1;
+            // الوقت على "الشبكة" بالضبط (0 ، 16.67 ، 33.33...) لحتى تطلع الحركة منتظمة
+            LONGLONG now100 = Elapsed100ns() / m_frameDuration * m_frameDuration;
+            if (last >= 0 && now100 <= last) now100 = last + m_frameDuration;
             last = now100;
-
             const bool key = m_shared->forceKeyframe[t].exchange(false);
-            if (FAILED(track.encoder.Encode(nv12.data(), now100, key, packets)))
+
+            if (track.nv)
             {
-                failed = true;
-                break;
+                // إنفيديا المباشر: الصورة ما بتطلع من كرت الشاشة
+                ID3D11Texture2D* tex = nullptr;
+                cp.out = nullptr;
+                cp.gpuOnly = true;
+                cp.outTexture = &tex;
+                compositor.Compose(layers, canvasW, canvasH, cp);
+                if (!tex)
+                {
+                    failed = true;                       // كرت الشاشة وقف
+                    break;
+                }
+                const int slot = track.pipe->Convert(tex);
+                if (slot >= 0)
+                {
+                    std::vector<NvPacket> nvp;
+                    const bool ok = track.nv->Encode(track.pipe->SlotTexture(slot), now100, m_frameDuration, nvp, key);
+                    track.pipe->Release(slot);
+                    if (!ok)
+                    {
+                        failed = true;
+                        break;
+                    }
+                    for (NvPacket& np : nvp)
+                    {
+                        EncodedPacket pkt;
+                        pkt.video    = true;
+                        pkt.hevc     = track.hevc;
+                        pkt.keyframe = bs::ToLengthPrefixed(np.data.data(), np.data.size(), track.hevc, pkt.data) || np.key;
+                        // الوقت = وقت فك الضغط ، وفرق العرض (B-frames) لحالو
+                        const LONGLONG dtsMs = (np.dts + track.videoOffset) / 10'000;
+                        const LONGLONG ptsMs = (np.pts + track.videoOffset) / 10'000;
+                        pkt.timeMs = (uint32_t)std::max<LONGLONG>(0, dtsMs);
+                        pkt.ctsMs  = (int32_t)std::max<LONGLONG>(0, ptsMs - dtsMs);
+                        if (!pkt.data.empty())
+                            packets.push_back(std::move(pkt));
+                    }
+                }
+                else if (key)
+                    m_shared->forceKeyframe[t] = true;  // الإطار انترك: الإطار الكامل للمرة الجاية
+            }
+            else
+            {
+                compositor.Compose(layers, canvasW, canvasH, cp);
+                BgraToNv12(frame.data(), (int)W, (int)H, nv12.data());
+                if (FAILED(track.encoder.Encode(nv12.data(), now100, key, packets)))
+                {
+                    failed = true;
+                    break;
+                }
             }
             for (EncodedPacket& p : packets)
                 p.track = (uint8_t)t;
@@ -273,17 +414,22 @@ void Streamer::VideoThread(int t)
                 std::lock_guard<std::mutex> lock(m_shared->mutex);
                 if (m_shared->avcConfig[t].empty())
                 {
-                    m_shared->avcConfig[t] = track.encoder.AvcConfig();
-                    if (t == 0 && m_opt.replay && !m_shared->avcConfig[t].empty())
+                    m_shared->avcConfig[t] = track.nv ? track.nvConfig : track.encoder.AvcConfig();
+                    if (t == 0 && m_opt.replay && !m_shared->avcConfig[t].empty() && !track.hevc)
                         m_opt.replay->SetVideoInfo(m_shared->avcConfig[t], (int)W, (int)H);
                 }
             }
             Broadcast(packets);
 
-            const LONGLONG next = (now100 / m_frameDuration + 1) * m_frameDuration;
-            const LONGLONG now  = Elapsed100ns();
-            if (next > now)
-                Sleep((DWORD)((next - now) / 10'000));
+            // منستنى لوقت الصورة الجاية بدقة (Sleep لحاله بيصحى بكّير شوي)
+            const LONGLONG next = now100 + m_frameDuration;
+            for (;;)
+            {
+                const LONGLONG now = Elapsed100ns();
+                if (now >= next || !m_running) break;
+                const LONGLONG ms = (next - now) / 10'000;
+                Sleep(ms >= 2 ? (DWORD)(ms - 1) : (ms >= 1 ? 1 : 0));
+            }
         }
         timeEndPeriod(1);
     }

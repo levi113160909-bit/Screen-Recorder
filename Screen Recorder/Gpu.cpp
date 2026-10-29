@@ -6,6 +6,7 @@
 
 #include <unknwn.h>
 #include <d3d11.h>
+#include <d3d10.h>      // ID3D10Multithread
 #include <dxgi1_2.h>
 #include <d2d1_1.h>
 #include <wrl/client.h>
@@ -108,10 +109,19 @@ struct GpuCompositor::Impl
     bool Init()
     {
         const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1 };
-        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        // VIDEO_SUPPORT: لحتى نقدر نحوّل الألوان ونضغط على نفس الجهاز (التسجيل السريع)
+        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
                                        levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device, nullptr, &context);
         if (FAILED(hr))
+            hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                   levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &device, nullptr, &context);
+        if (FAILED(hr))
             return false;
+        // المشفّر بيستعمل نفس الجهاز من خيط تاني: منحميه
+        ComPtr<ID3D10Multithread> mt;
+        if (SUCCEEDED(device.As(&mt)))
+            mt->SetMultithreadProtected(TRUE);
 
         ComPtr<IDXGIDevice> dxgi;
         if (FAILED(device.As(&dxgi)))
@@ -312,7 +322,7 @@ struct GpuCompositor::Impl
 
             src->poolSize = src->item.Size();
             src->pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
-                winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, src->poolSize);
+                winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, src->poolSize);   // 3 = ما بيضيع إطار
             src->session = src->pool.CreateCaptureSession(src->item);
             src->session.IsCursorCaptureEnabled(captureCursor);
             try { src->session.IsBorderRequired(false); } catch (...) {}   // بلا الإطار الأصفر (ويندوز 11)
@@ -326,10 +336,11 @@ struct GpuCompositor::Impl
     }
 
     // منسحب آخر صورة وصلت من المصدر لـ cache
-    void Update(Source& s)
+    // بيرجّع true إذا وصلت صورة جديدة من ويندوز
+    bool Update(Source& s)
     {
         if (s.failed || !s.pool)
-            return;
+            return false;
         wgc::Direct3D11CaptureFrame latest{ nullptr };
         for (auto f = s.pool.TryGetNextFrame(); f; f = s.pool.TryGetNextFrame())
         {
@@ -337,7 +348,7 @@ struct GpuCompositor::Impl
             latest = f;                      // منحتفظ بالأحدث بس
         }
         if (!latest)
-            return;
+            return false;
 
         const auto size = latest.ContentSize();
         ComPtr<ID3D11Texture2D> tex = TextureOf(latest.Surface());
@@ -348,7 +359,7 @@ struct GpuCompositor::Impl
         if (size.Width != s.poolSize.Width || size.Height != s.poolSize.Height)
         {
             s.poolSize = size;
-            s.pool.Recreate(winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+            s.pool.Recreate(winrtDevice, wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 3, size);
         }
 
         const UINT w = std::min<UINT>((UINT)std::max(1, size.Width), td.Width);
@@ -366,7 +377,7 @@ struct GpuCompositor::Impl
             if (FAILED(device->CreateTexture2D(&d, nullptr, &s.cache)))
             {
                 latest.Close();
-                return;
+                return false;
             }
             s.cacheW = w;
             s.cacheH = h;
@@ -374,6 +385,38 @@ struct GpuCompositor::Impl
         const D3D11_BOX box{ 0, 0, 0, w, h, 1 };
         context->CopySubresourceRegion(s.cache.Get(), 0, 0, 0, 0, tex.Get(), 0, &box);
         latest.Close();
+        return true;
+    }
+
+    // الإطارات المتغيّرة: في شي جديد من ويندوز (أو الكاميرا) من آخر مرة؟
+    // بتنسخ الصورة الجديدة لمكانها (متل Compose) بس بدون ما ترسم المشهد
+    std::map<int, unsigned long long> polledMedia;
+    bool PollNewFrames(const std::vector<SceneLayer>& layers)
+    {
+        bool fresh = false;
+        for (const SceneLayer& l : layers)
+        {
+            if (!l.visible)
+                continue;
+            if (l.kind == LayerKind::Capture)
+            {
+                auto it = sources.find(l.id);
+                if (it == sources.end() || !it->second)
+                    fresh = true;                  // لسا ما انفتح: Compose بيفتحه
+                else if (Update(*it->second))
+                    fresh = true;
+            }
+            else
+            {
+                std::shared_ptr<const MediaFrame> f = GetLayerFrame(l, nullptr);
+                if (f && f->version != polledMedia[l.id])
+                {
+                    polledMedia[l.id] = f->version;
+                    fresh = true;
+                }
+            }
+        }
+        return fresh;
     }
 
     bool Compose(const std::vector<SceneLayer>& layers, int cw, int ch, const ComposeParams& p)
@@ -492,6 +535,14 @@ struct GpuCompositor::Impl
             return false;
         dc->SetTarget(nullptr);
 
+        // الطريق السريع: الصورة بتضل على كرت الشاشة
+        if (p.gpuOnly)
+        {
+            if (p.outTexture)
+                *p.outTexture = canvas.Get();
+            return true;
+        }
+
         // منسحب الصورة الجاهزة للذاكرة
         context->CopyResource(staging.Get(), canvas.Get());
         D3D11_MAPPED_SUBRESOURCE map{};
@@ -529,6 +580,23 @@ std::unique_ptr<GpuCompositor> GpuCompositor::Create(bool captureCursor)
 }
 
 GpuCompositor::~GpuCompositor() = default;
+
+ID3D11Device* GpuCompositor::Device() const
+{
+    return m ? m->device.Get() : nullptr;
+}
+
+bool GpuCompositor::PollNewFrames(const std::vector<SceneLayer>& layers)
+{
+    try
+    {
+        return m->PollNewFrames(layers);
+    }
+    catch (...)
+    {
+        return true;
+    }
+}
 
 bool GpuCompositor::Compose(const std::vector<SceneLayer>& layers, int canvasW, int canvasH, const ComposeParams& params)
 {

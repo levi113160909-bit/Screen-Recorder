@@ -432,6 +432,41 @@ void H264Encoder::HandleOutput(IMFSample* sample, std::vector<EncodedPacket>& ou
         out.push_back(std::move(pkt));
 }
 
+void AnnexBToPacket(const uint8_t* p, size_t len, LONGLONG time100ns, bool keyframe,
+                    EncodedPacket& pkt, std::vector<uint8_t>* avcConfig)
+{
+    pkt.video    = true;
+    pkt.timeMs   = (uint32_t)(time100ns / 10'000);
+    pkt.keyframe = keyframe;
+    pkt.data.clear();
+    std::vector<uint8_t> sps, pps;
+    for (const auto& [nal, size] : SplitNals(p, len))
+    {
+        const int type = nal[0] & 0x1F;
+        if (type == 7) { sps.assign(nal, nal + size); continue; }
+        if (type == 8) { pps.assign(nal, nal + size); continue; }
+        if (type == 9 || type == 6) continue;                      // فاصل / معلومات إضافية
+        if (type == 5) pkt.keyframe = true;
+        pkt.data.push_back((uint8_t)(size >> 24));
+        pkt.data.push_back((uint8_t)(size >> 16));
+        pkt.data.push_back((uint8_t)(size >> 8));
+        pkt.data.push_back((uint8_t)size);
+        pkt.data.insert(pkt.data.end(), nal, nal + size);
+    }
+    if (avcConfig && sps.size() >= 4 && !pps.empty())
+    {
+        std::vector<uint8_t> cfg = { 1, sps[1], sps[2], sps[3], 0xFF, 0xE1 };
+        cfg.push_back((uint8_t)(sps.size() >> 8));
+        cfg.push_back((uint8_t)sps.size());
+        cfg.insert(cfg.end(), sps.begin(), sps.end());
+        cfg.push_back(1);
+        cfg.push_back((uint8_t)(pps.size() >> 8));
+        cfg.push_back((uint8_t)pps.size());
+        cfg.insert(cfg.end(), pps.begin(), pps.end());
+        *avcConfig = cfg;
+    }
+}
+
 // =============================================================
 //  AAC
 // =============================================================

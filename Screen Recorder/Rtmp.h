@@ -37,7 +37,12 @@ struct StreamTarget
     std::wstring key;                  // مفتاح البث (سرّي!)
     bool         enabled = true;
     bool         vertical = false;     // بث عمودي 9:16 (تيك توك)
+    int          codec = 0;            // 0 = H.264 ، 1 = HEVC (يوتيوب)
+    UINT32       kbps = 0;             // معدّل البت لهالمنصة (0 = الإعداد العام للبث)
 };
+
+// المنصة بتستقبل HEVC؟ (يوتيوب رسمياً ، و"مخصّص" على مسؤولية المستخدم)
+inline bool PlatformSupportsHevc(Platform p) { return p == Platform::YouTube || p == Platform::Custom; }
 
 enum class OutputState { Idle, Connecting, Live, Reconnecting, Failed };
 
@@ -53,6 +58,7 @@ struct OutputStatus
 struct StreamInfo
 {
     UINT32 width = 1920, height = 1080, fps = 30, videoKbps = 6000, audioKbps = 160;
+    bool   hevc = false;                // HEVC عبر Enhanced RTMP (يوتيوب) ، وإلا H.264
 };
 
 class RtmpOutput

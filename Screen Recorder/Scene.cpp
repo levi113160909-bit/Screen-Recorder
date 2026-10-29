@@ -25,6 +25,26 @@ Compositor::~Compositor()
         DeleteDC(m_dc);
 }
 
+bool Compositor::EnsureGpu()
+{
+    if (!m_gpuTried)
+    {
+        m_gpuTried = true;
+        m_gpu = GpuCompositor::Create(m_cursor);
+    }
+    return m_gpu != nullptr;
+}
+
+ID3D11Device* Compositor::GpuDevice() const
+{
+    return m_gpu ? m_gpu->Device() : nullptr;
+}
+
+bool Compositor::PollNewFrames(const std::vector<SceneLayer>& layers)
+{
+    return m_gpu ? m_gpu->PollNewFrames(layers) : true;
+}
+
 void Compositor::Compose(const std::vector<SceneLayer>& layers, int canvasW, int canvasH, const ComposeParams& params)
 {
     // أول مرة: منجرّب نشغّل محرّك كرت الشاشة (لازم بنفس الخيط اللي رح يستعمله)
@@ -38,6 +58,11 @@ void Compositor::Compose(const std::vector<SceneLayer>& layers, int canvasW, int
     {
         if (m_gpu->Compose(layers, canvasW, canvasH, params))
             return;
+        if (params.gpuOnly)   // الطريق السريع ما إله بديل (المسجّل بيعرف ويوقف)
+        {
+            if (params.outTexture) *params.outTexture = nullptr;
+            return;
+        }
         m_gpu.reset();        // صار خطأ بكرت الشاشة: منكمّل بالطريقة القديمة
         if (params.lostIds) params.lostIds->clear();
     }

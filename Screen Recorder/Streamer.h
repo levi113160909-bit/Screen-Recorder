@@ -21,6 +21,8 @@
 #include "Recorder.h"      // EncoderMode
 #include "Rtmp.h"
 #include "Replay.h"
+#include "GpuEncode.h"
+#include "NvEnc.h"
 
 // رسالة للواجهة إذا البث وقف لحالو (مشكلة بالمشفّر)
 // lParam = 1 إذا كان محرّك الإعادة
@@ -62,6 +64,16 @@ public:
     bool IsActive() const { return m_active; }
     LONGLONG ElapsedMs();
     std::wstring EncoderName() const { return m_encoderName; }
+    // مشفّر إنفيديا المباشر شغّال؟
+    bool UsingNvenc() const
+    {
+        for (const auto& t : m_tracks) if (t->nv) return true;
+        return false;
+    }
+    // كم نسخة فيديو عم ننضغط (المنصات المتطابقة بتتشارك نفس النسخة)
+    int EncodeCount() const { return (int)m_tracks.size(); }
+    // تنبيه للمستخدم (مثلاً HEVC ما زبط فرجعنا لـ H.264) - فاضي = تمام
+    std::wstring Warning() const { return m_warning; }
 
     // حالة كل وجهة (بنفس ترتيب options.targets)
     std::vector<OutputStatus> Status();
@@ -76,18 +88,33 @@ private:
     // أشيا مشتركة مع المُرسِلات (بتضل عايشة حتى لو المُرسِل لسا عم يسكّر)
     struct Shared
     {
-        std::mutex           mutex;
-        std::vector<uint8_t> avcConfig[2];
-        std::atomic<bool>    forceKeyframe[2];
-        Shared() { forceKeyframe[0] = true; forceKeyframe[1] = true; }
+        std::mutex                           mutex;
+        std::vector<std::vector<uint8_t>>    avcConfig;       // بطاقة تعريف الفيديو لكل نسخة (avcC / hvcC)
+        std::unique_ptr<std::atomic<bool>[]> forceKeyframe;   // إطار كامل لكل نسخة
+        explicit Shared(size_t n) : avcConfig(n), forceKeyframe(new std::atomic<bool>[n])
+        {
+            for (size_t i = 0; i < n; ++i) forceKeyframe[i] = true;
+        }
     };
 
+    // "نسخة" فيديو = اتجاه + ترميز + معدّل بت. المنصات اللي إلها نفس الثلاثة بتتشارك نسخة وحدة
     struct Track
     {
         bool        active = false;
+        bool        vertical = false;
+        bool        hevc = false;
+        UINT32      kbps = 6000;
+        int         bframes = 0;
+        LONGLONG    videoOffset = 0;               // تأخير صغير بسبب B-frames (لحتى الأوقات ما تكون سالبة)
         UINT32      width = 0, height = 0;
-        H264Encoder encoder;
+        H264Encoder encoder;                       // مشفّر ويندوز (احتياط)
+        // الطريق السريع مع إنفيديا: تركيب + تحويل + ضغط كله على كرت الشاشة
+        std::unique_ptr<Compositor>   comp;
+        std::unique_ptr<GpuFramePipe> pipe;
+        std::unique_ptr<NvencEncoder> nv;
+        std::vector<uint8_t>          nvConfig;     // SPS/PPS من NVENC
         std::thread thread;
+        void Reset() { encoder.Shutdown(); nv.reset(); pipe.reset(); comp.reset(); nvConfig.clear(); active = false; }
     };
 
     StreamOptions m_opt;
@@ -96,7 +123,8 @@ private:
     std::vector<int> m_outputTrack;
     std::vector<int> m_taps;
 
-    Track        m_tracks[2];
+    std::vector<std::unique_ptr<Track>> m_tracks;
+    std::wstring m_warning;
     AacEncoder   m_audio;
     std::mutex   m_broadcastMutex;          // الخيطين بيبعتوا لنفس المُرسِلات
     std::wstring m_encoderName;

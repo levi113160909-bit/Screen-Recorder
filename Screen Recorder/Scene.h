@@ -102,6 +102,10 @@ struct ComposeParams
     FadeInfo          fade;
     // أي جزء من اللوحة منرسم (0 = اللوحة كلها). بالبث العمودي منقص من النص مثلاً
     double            viewX = 0, viewY = 0, viewW = 0, viewH = 0;
+    // الطريق السريع (التسجيل على كرت الشاشة): ما منسحب الصورة للذاكرة،
+    // منرجّع الـ texture نفسه (out بيضل فاضي)
+    bool                      gpuOnly = false;
+    struct ID3D11Texture2D**  outTexture = nullptr;
 };
 
 // -------------------------------------------------------------
@@ -130,6 +134,13 @@ public:
     void Compose(const std::vector<SceneLayer>& layers, int canvasW, int canvasH, const ComposeParams& params);
 
     bool UsingGpu() const { return m_gpu != nullptr; }
+
+    // بيشغّل محرّك كرت الشاشة هلق (بدل أول رسمة)، ومنه منوصل للجهاز (للتسجيل السريع)
+    bool                 EnsureGpu();
+    struct ID3D11Device* GpuDevice() const;
+
+    // الإطارات المتغيّرة: في صورة جديدة من آخر مرة؟ (الطريقة القديمة ما بتعرف: دايماً نعم)
+    bool PollNewFrames(const std::vector<SceneLayer>& layers);
 
 private:
     void ComposeGdi(const std::vector<SceneLayer>& layers, int canvasW, int canvasH, const ComposeParams& p);
