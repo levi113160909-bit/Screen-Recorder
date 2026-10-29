@@ -19,6 +19,7 @@ struct OverlayState
     bool      recording = false;
     bool      paused    = false;
     bool      streaming = false;
+    double    uploadKbps = 0;      // سرعة الرفع الحالية للبث (مجموع كل المنصات)
     LONGLONG  elapsedMs = 0;
     bool      micOn     = false;   // المايك مفعّل وشغّال
     bool      micMuted  = false;

@@ -218,3 +218,40 @@ std::wstring LtrText(const std::wstring& s)
     const wchar_t lre = 0x202A, pdf = 0x202C;   // بداية ونهاية نص من اليسار لليمين
     return std::wstring(1, lre) + s + std::wstring(1, pdf);
 }
+
+// =============================================================
+//  الثيمات
+// =============================================================
+namespace Theme
+{
+    namespace
+    {
+        struct Palette { UINT32 bg, panel, card, hover, border, text, sub, off; };
+        const Palette PALETTES[THEME_COUNT] = {
+            { 0x0E1014, 0x16191F, 0x1D2129, 0x252A34, 0x2A2F3A, 0xE8EAED, 0x8B93A3, 0x3A404D },   // داكن
+            { 0x000000, 0x0B0C0E, 0x131418, 0x1C1E23, 0x22252B, 0xEDEEF0, 0x8A909C, 0x34383F },   // أسود (لشاشات OLED)
+            { 0x0D1321, 0x141C2E, 0x1A2338, 0x222D47, 0x27324D, 0xE6EBF5, 0x8D99B3, 0x37425E },   // كحلي
+        };
+        const UINT32 ACCENTS[ACCENT_COUNT] = { 0x4F8CFF, 0x8B5CF6, 0x14B8A6, 0xF97316, 0xEC4899, 0xEAB308 };
+        const wchar_t* THEME_NAMES[THEME_COUNT]   = { L"داكن", L"أسود", L"كحلي" };
+        const wchar_t* ACCENT_NAMES[ACCENT_COUNT] = { L"أزرق", L"بنفسجي", L"فيروزي", L"برتقالي", L"وردي", L"ذهبي" };
+    }
+
+    const wchar_t* ThemeName(int i)    { return THEME_NAMES[(i % THEME_COUNT + THEME_COUNT) % THEME_COUNT]; }
+    const wchar_t* AccentName(int i)   { return ACCENT_NAMES[(i % ACCENT_COUNT + ACCENT_COUNT) % ACCENT_COUNT]; }
+    D2D1_COLOR_F   AccentPreview(int i){ return D2D1::ColorF(ACCENTS[(i % ACCENT_COUNT + ACCENT_COUNT) % ACCENT_COUNT]); }
+
+    void Apply(int theme, int accent)
+    {
+        const Palette& p = PALETTES[(theme % THEME_COUNT + THEME_COUNT) % THEME_COUNT];
+        Background = D2D1::ColorF(p.bg);
+        Panel      = D2D1::ColorF(p.panel);
+        Card       = D2D1::ColorF(p.card);
+        Hover      = D2D1::ColorF(p.hover);
+        Border     = D2D1::ColorF(p.border);
+        Text       = D2D1::ColorF(p.text);
+        SubText    = D2D1::ColorF(p.sub);
+        Off        = D2D1::ColorF(p.off);
+        Accent     = AccentPreview(accent);
+    }
+}

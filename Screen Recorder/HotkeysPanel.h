@@ -27,6 +27,7 @@ public:
 
 private:
     void StartListening(int action);
+    void OnCaptured(UINT vk, UINT mods);
     void StopListening();
     void Commit(int action, const HotkeyBinding& b);
 

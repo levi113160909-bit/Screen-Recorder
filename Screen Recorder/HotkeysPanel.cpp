@@ -57,7 +57,10 @@ HotkeysPanel::HotkeysPanel(HotkeyManager& mgr, std::function<void()> changed)
 HotkeysPanel::~HotkeysPanel()
 {
     if (m_listen >= 0)
+    {
+        m_mgr.EndCapture();
         m_mgr.Suspend(false);      // انسكّرت وانت عم تسجّل اختصار: منرجّعهم
+    }
 }
 
 float HotkeysPanel::BodyHeight() const
@@ -72,6 +75,8 @@ void HotkeysPanel::StartListening(int action)
         m_mgr.Suspend(true);       // لحتى توصلنا الكبسة بدل ما تشغّل الاختصار القديم
     m_listen = action;
     m_note.clear();
+    // المراقب بيمسك أي زر (حتى PrintScreen و Win و F12 وأزرار الفأرة الجانبية)
+    m_mgr.BeginCapture([this](const HotkeyBinding& b) { OnCaptured(b.vk, b.mods); });
 }
 
 void HotkeysPanel::StopListening()
@@ -79,6 +84,7 @@ void HotkeysPanel::StopListening()
     if (m_listen < 0)
         return;
     m_listen = -1;
+    m_mgr.EndCapture();
     m_mgr.Suspend(false);
 }
 
@@ -90,9 +96,11 @@ void HotkeysPanel::Commit(int action, const HotkeyBinding& b)
     m_noteError = false;
     if (m_mgr.Failed(action))
     {
-        m_note = L"هذا الاختصار مستخدم من برنامج آخر، اختر غيره";
+        m_note = L"تعذّر تفعيل هذا الاختصار، اختر غيره";
         m_noteError = true;
     }
+    else if (b.vk && b.mods == 0 && !OkAlone(b.vk) && !HotkeyManager::IsMouse(b.vk))
+        m_note = L"تم الحفظ • تنبيه: هذا الزر يُستخدم في الكتابة، فسيعمل الاختصار أثناء الكتابة أيضًا";
     else if (moved >= 0)
         m_note = L"نُقل الاختصار من: " + m_mgr.Name(moved);
     else
@@ -100,31 +108,31 @@ void HotkeysPanel::Commit(int action, const HotkeyBinding& b)
     m_noteFrame = m_frame;
 }
 
+// الزر اللي انمسك (من المراقب ، أو من الكيبورد العادي إذا المراقب ما اشتغل)
+void HotkeysPanel::OnCaptured(UINT vk, UINT mods)
+{
+    if (m_listen < 0)
+        return;
+    if (vk == VK_ESCAPE && mods == 0)
+    {
+        StopListening();
+        return;
+    }
+    if ((vk == VK_BACK || vk == VK_DELETE) && mods == 0)
+    {
+        Commit(m_listen, {});
+        return;
+    }
+    Commit(m_listen, { mods, vk });     // أي زر بدك ياه
+}
+
 bool HotkeysPanel::OnKeyDown(WPARAM vk)
 {
     if (m_listen < 0)
         return false;              // مش عم نستنى: Esc بيسكّر النافذة عادي
-    if (vk == VK_ESCAPE)
-    {
-        StopListening();
-        return true;
-    }
     if (IsModifier(vk))
         return true;               // منستنى الزر الأساسي
-    const UINT mods = CurrentMods();
-    if ((vk == VK_BACK || vk == VK_DELETE) && mods == 0)
-    {
-        Commit(m_listen, {});
-        return true;
-    }
-    if (mods == 0 && !OkAlone(vk))
-    {
-        m_note = L"هذا الزر يُستخدم في الكتابة، أضف إليه Ctrl أو Alt أو Shift";
-        m_noteError = true;
-        m_noteFrame = m_frame;
-        return true;               // منضل نستنى
-    }
-    Commit(m_listen, { mods, (UINT)vk });
+    OnCaptured((UINT)vk, CurrentMods());
     return true;
 }
 
@@ -136,7 +144,7 @@ void HotkeysPanel::DrawBody(float L, float top, float R)
     // ---- شرح صغير ----
     const D2D1_RECT_F info = Rect(L, y, R, y + INFO_H);
     Fill(info, WithAlpha(Theme::Accent, 0.10f), 10);
-    Text(L"اضغط على الاختصار، ثم اضغط المفاتيح الجديدة معًا", g_fBody.Get(), Rect(L + 14, y + 8, R - 14, y + 30), Theme::Text);
+    Text(L"اضغط على الاختصار، ثم أي زر أو مجموعة أزرار (أو زر الفأرة الجانبي)", g_fBody.Get(), Rect(L + 14, y + 8, R - 14, y + 30), Theme::Text);
     Text(L"Esc للإلغاء  •  Backspace لإزالة الاختصار", g_fSmall.Get(), Rect(L + 14, y + 31, R - 14, y + 50), Theme::SubText);
     y += INFO_H + 10;
 

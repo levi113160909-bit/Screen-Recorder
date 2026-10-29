@@ -3,6 +3,123 @@
 // =============================================================
 #include "Hotkeys.h"
 #include <cwchar>
+#include <atomic>
+#include <mutex>
+#include <thread>
+
+// =============================================================
+//  "مراقب الأزرار" (Low-level hook) بخيط لحالو
+//  ليش؟ ويندوز ما بيقبل كل الاختصارات (مثلاً F12 لحاله، أو إذا برنامج تاني ماخده)،
+//  وما بيقبل أزرار الفأرة أبداً. المراقب بيشوف كل كبسة قبل الكل:
+//   - بيشغّل الاختصارات اللي ويندوز رفضها (وأزرار الفأرة)
+//   - وبيمسك الاختصار الجديد بنافذة الاختصارات (أي زر بدك ياه)
+//  بخيط لحالو لحتى لو الواجهة مشغولة ما يتأخر الكيبورد بكل الجهاز.
+// =============================================================
+namespace
+{
+    std::mutex                                g_hookMutex;
+    std::vector<std::pair<int, HotkeyBinding>> g_hookBindings;   // الخانة ← الاختصار
+    std::atomic<bool>                         g_capturing{ false };
+    std::atomic<HWND>                         g_target{ nullptr };
+    std::atomic<bool>                         g_hookStarted{ false };
+    bool                                      g_down[256] = {};  // (بخيط المراقب بس)
+
+    UINT ModsNow()
+    {
+        UINT m = 0;
+        if (g_down[VK_LCONTROL] || g_down[VK_RCONTROL] || g_down[VK_CONTROL]) m |= MOD_CONTROL;
+        if (g_down[VK_LMENU] || g_down[VK_RMENU] || g_down[VK_MENU])          m |= MOD_ALT;
+        if (g_down[VK_LSHIFT] || g_down[VK_RSHIFT] || g_down[VK_SHIFT])       m |= MOD_SHIFT;
+        if (g_down[VK_LWIN] || g_down[VK_RWIN])                               m |= MOD_WIN;
+        return m;
+    }
+    bool IsModifierVk(UINT vk)
+    {
+        switch (vk)
+        {
+        case VK_SHIFT: case VK_CONTROL: case VK_MENU: case VK_LWIN: case VK_RWIN:
+        case VK_LSHIFT: case VK_RSHIFT: case VK_LCONTROL: case VK_RCONTROL: case VK_LMENU: case VK_RMENU:
+            return true;
+        }
+        return false;
+    }
+
+    // كبسة جديدة (مش تكرار): بترجّع true إذا لازم "نبلعها"
+    bool OnPress(UINT vk)
+    {
+        const HWND target = g_target;
+        const UINT mods = ModsNow();
+        if (g_capturing)
+        {
+            if (IsModifierVk(vk))
+                return true;                  // منبلع Ctrl/Win... (لحتى ما تفتح قائمة ابدأ مثلاً) ومنستنى الزر الأساسي
+            g_capturing = false;
+            if (target) PostMessageW(target, WM_HOTKEY_CAPTURE, vk, mods);
+            return true;
+        }
+        std::lock_guard<std::mutex> lock(g_hookMutex);
+        for (const auto& [slot, b] : g_hookBindings)
+            if (b.vk == vk && b.mods == mods && target)
+                PostMessageW(target, WM_HOTKEY, (WPARAM)(slot + 1), 0);
+        return false;                         // الاختصار العادي ما منبلعه (بيوصل للعبة كمان)
+    }
+
+    LRESULT CALLBACK KeyboardProc(int code, WPARAM wp, LPARAM lp)
+    {
+        if (code == HC_ACTION)
+        {
+            const auto* k = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lp);
+            const UINT vk = k->vkCode & 0xFF;
+            const bool down = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN;
+            const bool capturing = g_capturing;
+            if (down)
+            {
+                const bool repeat = g_down[vk];
+                g_down[vk] = true;
+                if (!repeat && OnPress(vk))
+                    return 1;
+                if (repeat && capturing)
+                    return 1;
+            }
+            else
+            {
+                g_down[vk] = false;
+                if (capturing)
+                    return 1;
+            }
+        }
+        return CallNextHookEx(nullptr, code, wp, lp);
+    }
+
+    LRESULT CALLBACK MouseProc(int code, WPARAM wp, LPARAM lp)
+    {
+        if (code == HC_ACTION)
+        {
+            const auto* m = reinterpret_cast<const MSLLHOOKSTRUCT*>(lp);
+            UINT vk = 0;
+            if (wp == WM_MBUTTONDOWN) vk = VK_MBUTTON;
+            if (wp == WM_XBUTTONDOWN) vk = HIWORD(m->mouseData) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2;
+            if (vk && OnPress(vk))
+                return 1;
+        }
+        return CallNextHookEx(nullptr, code, wp, lp);
+    }
+
+    void EnsureHookThread()
+    {
+        if (g_hookStarted.exchange(true))
+            return;
+        std::thread([]
+        {
+            HHOOK kb = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, GetModuleHandleW(nullptr), 0);
+            HHOOK ms = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, GetModuleHandleW(nullptr), 0);
+            MSG msg;
+            while (GetMessageW(&msg, nullptr, 0, 0) > 0) {}
+            if (kb) UnhookWindowsHookEx(kb);
+            if (ms) UnhookWindowsHookEx(ms);
+        }).detach();
+    }
+}
 
 HotkeyManager::HotkeyManager()
 {
@@ -68,6 +185,9 @@ std::wstring HotkeyManager::Text(const HotkeyBinding& b)
     if (b.mods & MOD_WIN)     s += L"Win + ";
 
     const UINT vk = b.vk;
+    if (vk == VK_MBUTTON)       return s + L"زر الفأرة الأوسط";
+    if (vk == VK_XBUTTON1)      return s + L"زر الفأرة الجانبي 1";
+    if (vk == VK_XBUTTON2)      return s + L"زر الفأرة الجانبي 2";
     if (vk >= VK_F1 && vk <= VK_F24)            s += L"F" + std::to_wstring(vk - VK_F1 + 1);
     else if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z')) s += (wchar_t)vk;
     else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) s += L"Num " + std::to_wstring(vk - VK_NUMPAD0);
@@ -136,16 +256,56 @@ void HotkeyManager::UnregisterAll()
 void HotkeyManager::Apply(HWND hwnd)
 {
     m_hwnd = hwnd;
+    g_target = hwnd;
     UnregisterAll();
     m_failed.assign(m_keys.size(), false);
+    m_viaHook.assign(m_keys.size(), false);
     m_registered = (int)m_keys.size();
     for (int i = 0; i < (int)m_keys.size(); ++i)
     {
         if (m_suspended || !m_keys[i].vk)
             continue;
-        if (!RegisterHotKey(hwnd, i + 1, m_keys[i].mods | MOD_NOREPEAT, m_keys[i].vk))
-            m_failed[i] = true;        // برنامج تاني ماخده
+        // أزرار الفأرة، أو اللي ويندوز رفضه (برنامج تاني ماخده أو محجوز): عن طريق المراقب
+        if (IsMouse(m_keys[i].vk) || !RegisterHotKey(hwnd, i + 1, m_keys[i].mods | MOD_NOREPEAT, m_keys[i].vk))
+            m_viaHook[i] = true;
     }
+    UpdateHook();
+}
+
+void HotkeyManager::UpdateHook()
+{
+    std::vector<std::pair<int, HotkeyBinding>> list;
+    for (int i = 0; i < (int)m_keys.size(); ++i)
+        if (i < (int)m_viaHook.size() && m_viaHook[i] && !m_suspended)
+            list.push_back({ i, m_keys[i] });
+    {
+        std::lock_guard<std::mutex> lock(g_hookMutex);
+        g_hookBindings = std::move(list);
+    }
+    if (!g_hookBindings.empty())
+        EnsureHookThread();
+}
+
+void HotkeyManager::BeginCapture(std::function<void(const HotkeyBinding&)> done)
+{
+    m_captureDone = std::move(done);
+    if (m_hwnd) g_target = m_hwnd;
+    EnsureHookThread();
+    g_capturing = true;
+}
+
+void HotkeyManager::EndCapture()
+{
+    g_capturing = false;
+    m_captureDone = nullptr;
+}
+
+void HotkeyManager::OnCaptureMessage(WPARAM wParam, LPARAM lParam)
+{
+    auto done = m_captureDone;
+    m_captureDone = nullptr;
+    if (done)
+        done({ (UINT)lParam, (UINT)wParam });
 }
 
 void HotkeyManager::Suspend(bool on)
@@ -154,7 +314,10 @@ void HotkeyManager::Suspend(bool on)
         return;
     m_suspended = on;
     if (on)
+    {
         UnregisterAll();
+        UpdateHook();                  // والمراقب كمان ما بيشغّل شي
+    }
     else if (m_hwnd)
         Apply(m_hwnd);
 }

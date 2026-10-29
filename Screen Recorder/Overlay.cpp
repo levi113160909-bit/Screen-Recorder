@@ -144,7 +144,7 @@ float RecordingOverlay::PillWidth(const OverlayState& s) const
     const bool showDot = s.recording || s.streaming;
     float w = showDot ? 26.0f : 8.0f;
     if (s.recording) w += 52;
-    if (s.streaming) w += 52;
+    if (s.streaming) w += 52 + 96;                      // "مباشر" + سرعة الرفع
     if (s.replay)    w += s.replaySaved ? 66 : 30;
     return w + 38;                                       // المايك + هامش
 }
@@ -204,6 +204,12 @@ void RecordingOverlay::DrawPill(const OverlayState& s, float x0, float y0, float
         fill(badge, D2D1::ColorF(0xE5484D, 0.9f), 4);
         text(L"مباشر", m_fBadge.Get(), badge, D2D1::ColorF(0xFFFFFF));
         cx += 52;
+        // سرعة الرفع اللحظية جنب "مباشر"
+        wchar_t up[48];
+        swprintf_s(up, L"%.1f ميغابت/ث", s.uploadKbps / 1000.0);
+        text(up, m_fBadge.Get(), R(cx, 0, cx + 92, H),
+             s.uploadKbps > 0 ? D2D1::ColorF(0x3DD68C) : D2D1::ColorF(0xFFFFFF, 0.6f));
+        cx += 96;
     }
     if (s.replay)       // الإعادة: أزرق = جاهزة ، أخضر "حُفظ" = حفظت مقطع
     {

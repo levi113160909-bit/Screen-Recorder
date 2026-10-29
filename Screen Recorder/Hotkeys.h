@@ -13,8 +13,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <functional>
 #include <string>
 #include <vector>
+
+// الاختصار اللي انمسك بنافذة الاختصارات (من المراقب): wParam = الزر ، lParam = Ctrl/Alt/Shift/Win
+constexpr UINT WM_HOTKEY_CAPTURE = WM_APP + 40;
 
 enum HotkeyAction : int
 {
@@ -32,7 +36,7 @@ enum HotkeyAction : int
 struct HotkeyBinding
 {
     UINT mods = 0;      // MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN
-    UINT vk   = 0;      // 0 = بلا اختصار
+    UINT vk   = 0;      // 0 = بلا اختصار (وفيه أزرار الفأرة: الأوسط والجانبيين)
     bool operator==(const HotkeyBinding& o) const { return mods == o.mods && vk == o.vk; }
 };
 
@@ -64,6 +68,16 @@ public:
     // بيرجّع رقم الخانة اللي كانت ماخدة هالاختصار (ومنشيله منها)، أو -1
     int  Set(int slot, const HotkeyBinding& b);
     bool Failed(int slot) const { return slot >= 0 && slot < (int)m_failed.size() && m_failed[slot]; }
+    // الاختصار شغّال عن طريق "مراقب الأزرار" (لأن ويندوز ما قبله، أو زر فأرة) بدل تسجيله عند ويندوز
+    bool ViaHook(int slot) const { return slot >= 0 && slot < (int)m_viaHook.size() && m_viaHook[slot]; }
+    static bool IsMouse(UINT vk) { return vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2; }
+
+    // التقاط اختصار جديد: أي زر بالكيبورد (حتى PrintScreen و Win) أو زر الفأرة الأوسط/الجانبي.
+    // الكبسة بتنمسك قبل ويندوز وأي برنامج، وبتوصل لـ done (على خيط الواجهة)
+    void BeginCapture(std::function<void(const HotkeyBinding&)> done);
+    void EndCapture();
+    // main.cpp بيبعتلنا رسالة WM_HOTKEY_CAPTURE
+    void OnCaptureMessage(WPARAM wParam, LPARAM lParam);
 
     // رقم الاختصار عند ويندوز -> الخانة
     static int SlotFromId(WPARAM id) { return (int)id - 1; }
@@ -73,6 +87,9 @@ private:
     bool          m_suspended = false;
     std::vector<HotkeyBinding> m_keys;            // HK_COUNT + عدد المشاهد
     std::vector<bool>          m_failed;
+    std::vector<bool>          m_viaHook;
+    std::function<void(const HotkeyBinding&)> m_captureDone;
+    void UpdateHook();
     std::vector<std::wstring>  m_sceneNames;
     int                        m_registered = 0;  // كم واحد سجّلنا (لحتى نشيلهم كلهم)
 };

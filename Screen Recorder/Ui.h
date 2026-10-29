@@ -24,24 +24,31 @@
 using Microsoft::WRL::ComPtr;
 
 // =============================================================
-//  الألوان (ثيم داكن)
+//  الألوان (ثيم داكن ، وفي ثيمات وألوان تانية من الإعدادات)
 // =============================================================
 namespace Theme
 {
-    inline const D2D1_COLOR_F Background = D2D1::ColorF(0x0E1014);
-    inline const D2D1_COLOR_F Panel      = D2D1::ColorF(0x16191F);
-    inline const D2D1_COLOR_F Card       = D2D1::ColorF(0x1D2129);
-    inline const D2D1_COLOR_F Hover      = D2D1::ColorF(0x252A34);
-    inline const D2D1_COLOR_F Border     = D2D1::ColorF(0x2A2F3A);
-    inline const D2D1_COLOR_F Text       = D2D1::ColorF(0xE8EAED);
-    inline const D2D1_COLOR_F SubText    = D2D1::ColorF(0x8B93A3);
-    inline const D2D1_COLOR_F Accent     = D2D1::ColorF(0x4F8CFF);
-    inline const D2D1_COLOR_F Red        = D2D1::ColorF(0xE5484D);
-    inline const D2D1_COLOR_F RedHover   = D2D1::ColorF(0xF0656A);
-    inline const D2D1_COLOR_F Green      = D2D1::ColorF(0x3DD68C);
-    inline const D2D1_COLOR_F Yellow     = D2D1::ColorF(0xF5A524);
-    inline const D2D1_COLOR_F Off        = D2D1::ColorF(0x3A404D);
-    inline const D2D1_COLOR_F White      = D2D1::ColorF(0xFFFFFF);
+    inline D2D1_COLOR_F Background = D2D1::ColorF(0x0E1014);
+    inline D2D1_COLOR_F Panel      = D2D1::ColorF(0x16191F);
+    inline D2D1_COLOR_F Card       = D2D1::ColorF(0x1D2129);
+    inline D2D1_COLOR_F Hover      = D2D1::ColorF(0x252A34);
+    inline D2D1_COLOR_F Border     = D2D1::ColorF(0x2A2F3A);
+    inline D2D1_COLOR_F Text       = D2D1::ColorF(0xE8EAED);
+    inline D2D1_COLOR_F SubText    = D2D1::ColorF(0x8B93A3);
+    inline D2D1_COLOR_F Accent     = D2D1::ColorF(0x4F8CFF);
+    inline D2D1_COLOR_F Red        = D2D1::ColorF(0xE5484D);
+    inline D2D1_COLOR_F RedHover   = D2D1::ColorF(0xF0656A);
+    inline D2D1_COLOR_F Green      = D2D1::ColorF(0x3DD68C);
+    inline D2D1_COLOR_F Yellow     = D2D1::ColorF(0xF5A524);
+    inline D2D1_COLOR_F Off        = D2D1::ColorF(0x3A404D);
+    inline D2D1_COLOR_F White      = D2D1::ColorF(0xFFFFFF);
+
+    // الثيمات واللون الأساسي (من الإعدادات ← عام). بيتغيّروا فوراً
+    constexpr int THEME_COUNT = 3, ACCENT_COUNT = 6;
+    const wchar_t* ThemeName(int i);
+    const wchar_t* AccentName(int i);
+    D2D1_COLOR_F   AccentPreview(int i);
+    void           Apply(int theme, int accent);
 }
 
 // أيقونات من خط "Segoe MDL2 Assets" (موجود بكل ويندوز 10 و 11)

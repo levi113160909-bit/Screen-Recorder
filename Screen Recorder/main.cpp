@@ -96,6 +96,10 @@ enum : int
     ID_STREAM_FPS_FIRST    = 260,  // 3 خيارات (إطارات البث): مثل التسجيل ، 30 ، 60
     ID_STREAM_PRESET_FIRST = 264,  // 6 أرقام جاهزة لمعدّل بت البث (264..269)
     ID_STREAM_SETTINGS     = 270,  // زر "إعدادات البث" بتبويب البث
+    ID_THEME_FIRST         = 280,  // 3 ثيمات (280..282)
+    ID_ACCENT_FIRST        = 284,  // 6 ألوان (284..289)
+    ID_ABOUT_GITHUB        = 292,
+    ID_OPEN_CONFIG         = 293,
     ID_LAYER_FIRST   = 1000,    // الطبقة رقم id = ID_LAYER_FIRST + id
     ID_EYE_FIRST     = 3000,
     ID_DELETE_FIRST  = 5000,
@@ -229,6 +233,10 @@ int          g_encoderMode    = 0;     // 0 تلقائي ، 1 بطاقة الر�
 bool         g_crashSafe      = true;  // MP4 آمن (مقطّع)
 bool         g_separateTracks = false; // مسار صوت لكل مصدر (للمونتاج)
 int          g_codec          = 0;     // صيغة الضغط: 0 H.264 ، 1 HEVC ، 2 AV1
+int          g_themeChoice    = 0;     // الثيم: 0 داكن ، 1 أسود ، 2 كحلي
+int          g_accentChoice   = 0;     // اللون الأساسي
+const wchar_t* APP_VERSION    = L"1.1.0";
+const wchar_t* APP_URL        = L"https://github.com/levi113160909-bit/Screen-Recorder";
 int          g_overlayCorner  = 1;     // مؤشر التسجيل: 0 مخفي ، 1 أعلى اليمين ، 2 أعلى اليسار ، 3 أسفل اليمين ، 4 أسفل اليسار
 RecordingOverlay g_overlay;
 int          g_overlayLastCorner = 1;  // لما تخفيه بالاختصار ومنرجّعه، بيرجع لنفس الزاوية
@@ -1814,6 +1822,8 @@ void SaveSettings()
     put(L"Codec",          std::to_wstring(g_codec));
     put(L"OverlayCorner",  std::to_wstring(g_overlayCorner));
     put(L"CloseToTray",    g_closeToTray ? L"1" : L"0");
+    put(L"Theme",          std::to_wstring(g_themeChoice));
+    put(L"Accent",         std::to_wstring(g_accentChoice));
     put(L"Toasts",         g_toastsOn ? L"1" : L"0");
     put(L"OverlayOverApp", g_overlayOverApp ? L"1" : L"0");
     put(L"TrayHintShown",  g_trayHintShown ? L"1" : L"0");
@@ -1895,6 +1905,9 @@ void LoadSettings()
     g_codec          = std::clamp(getInt(L"Codec", 0), 0, 2);
     g_overlayCorner  = std::clamp(getInt(L"OverlayCorner", 1), 0, 4);
     g_closeToTray    = getInt(L"CloseToTray", 1) != 0;
+    g_themeChoice    = std::clamp(getInt(L"Theme", 0), 0, Theme::THEME_COUNT - 1);
+    g_accentChoice   = std::clamp(getInt(L"Accent", 0), 0, Theme::ACCENT_COUNT - 1);
+    Theme::Apply(g_themeChoice, g_accentChoice);
     g_toastsOn       = getInt(L"Toasts", 1) != 0;
     g_overlayOverApp = getInt(L"OverlayOverApp", 1) != 0;
     g_trayHintShown  = getInt(L"TrayHintShown", 0) != 0;
@@ -3441,17 +3454,18 @@ float DrawSettingsPage(int page, float L, float top, float R)
 
     switch (page)
     {
-    case SP_VIDEO:
+    case SP_RECORDING:
     {
         Locked();
         int pw, ph;
         PrimaryMonitorSize(pw, ph);
-        Option(L"دقة الفيديو", [&]
+        Option(L"دقة اللوحة", [&]
         {
             DrawSegmented(Rect(l, y, r, y + 34), { L"الشاشة", L"1440p", L"1080p", L"720p" }, g_canvasChoice, O + ID_CANVAS_FIRST, !locked);
             y += 40;
-            Hint(g_canvasChoice == 0 ? L"بحجم الشاشة الرئيسية ← " + SizeText(pw & ~1, ph & ~1)
-                                     : SizeText(CANVAS_H[g_canvasChoice] * 16 / 9, CANVAS_H[g_canvasChoice]));
+            Hint((g_canvasChoice == 0 ? L"بحجم الشاشة الرئيسية ← " + SizeText(pw & ~1, ph & ~1)
+                                      : SizeText(CANVAS_H[g_canvasChoice] * 16 / 9, CANVAS_H[g_canvasChoice]))
+                 + L" • هي مساحة المشهد، ويُبث منها أيضًا");
         });
         Option(L"معدّل الإطارات", [&]
         {
@@ -3511,7 +3525,7 @@ float DrawSettingsPage(int page, float L, float top, float R)
             y += 42;
             const D2D1_RECT_F enc = Rect(l, y, r, y + 34);
             Fill(enc, AddHit(enc, O + ID_ENCODER_MENU) && !locked ? Theme::Hover : Theme::Background, 9);
-            Text(L"المشفّر: " + EncoderLabel(), g_fBody.Get(), Rect(l + 34, y, r - 12, y + 34), locked ? Theme::SubText : Theme::Text);
+            Text(L"المشفّر: " + EncoderLabel() + L" (للتسجيل والبث والإعادة)", g_fBody.Get(), Rect(l + 34, y, r - 12, y + 34), locked ? Theme::SubText : Theme::Text);
             Text(Icon::Chevron, g_fIcon.Get(), Rect(l + 4, y, l + 30, y + 34), Theme::SubText);
             y += 42;
             static const wchar_t* hints[] = {
@@ -3529,12 +3543,6 @@ float DrawSettingsPage(int page, float L, float top, float R)
             if (!g_previewCompositor.UsingGpu())
                 Hint(L"تنبيه: التصوير بالطريقة القديمة (GDI) لأن بطاقة الرسومات غير متاحة", Theme::Yellow);
         });
-        break;
-    }
-
-    case SP_RECORDING:
-    {
-        Locked();
         Option(L"مكان حفظ التسجيلات", [&]
         {
             const D2D1_RECT_F box = Rect(l, y, r, y + 34);
@@ -3700,6 +3708,48 @@ float DrawSettingsPage(int page, float L, float top, float R)
         {
             DrawSegmented(Rect(l, y, r, y + 34), { L"فوري", L"تلاشٍ سريع", L"تلاشٍ ناعم" }, g_transitionChoice, O + ID_TRANSITION_FIRST, true);
             y += 40;
+        });
+        Option(L"المظهر", [&]
+        {
+            std::vector<std::wstring> themes;
+            for (int i = 0; i < Theme::THEME_COUNT; ++i) themes.push_back(Theme::ThemeName(i));
+            DrawSegmented(Rect(l, y, r, y + 34), themes, g_themeChoice, O + ID_THEME_FIRST, true);
+            y += 44;
+            Text(L"اللون الأساسي", g_fSmall.Get(), Rect(l, y, r, y + 18), Theme::SubText);
+            y += 24;
+            // دوائر الألوان (من اليمين لليسار)
+            const float cell = (r - l) / Theme::ACCENT_COUNT;
+            for (int i = 0; i < Theme::ACCENT_COUNT; ++i)
+            {
+                const float cx = r - cell * i - cell / 2;
+                const D2D1_RECT_F hit = Rect(cx - cell / 2 + 2, y, cx + cell / 2 - 2, y + 58);
+                const bool hover = AddHit(hit, O + ID_ACCENT_FIRST + i);
+                if (hover) Fill(hit, Theme::Hover, 8);
+                Circle(cx, y + 18, 13, Theme::AccentPreview(i));
+                if (i == g_accentChoice)
+                {
+                    g_brush->SetColor(Theme::Text);
+                    g_rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, y + 18), 17, 17), g_brush.Get(), 2);
+                }
+                Text(Theme::AccentName(i), g_fSegment.Get(), Rect(hit.left, y + 36, hit.right, y + 56),
+                     i == g_accentChoice ? Theme::Text : Theme::SubText);
+            }
+            y += 64;
+        });
+        Option(L"حول البرنامج", [&]
+        {
+            Circle(r - 18, y + 20, 16, Theme::Red);
+            Circle(r - 18, y + 20, 6, Theme::White);
+            Text(L"مسجّل الشاشة", g_fSection.Get(), Rect(l, y, r - 44, y + 22), Theme::Text);
+            Text(L"الإصدار " + LtrText(APP_VERSION), g_fSmall.Get(), Rect(l, y + 22, r - 44, y + 40), Theme::SubText);
+            y += 50;
+            Hint(L"تسجيل وبث وإعادة بواجهة عربية، مجاني ومفتوح المصدر");
+            Hint(L"يضغط الفيديو على بطاقة الرسومات مباشرةً (NVIDIA NVENC) لجودة عالية وحمل خفيف");
+            y += 4;
+            DrawButton(Rect(r - 170, y, r, y + 32), L"صفحة المشروع", O + ID_ABOUT_GITHUB, false, true);
+            DrawButton(Rect(r - 350, y, r - 180, y + 32), L"مجلد الإعدادات", O + ID_OPEN_CONFIG, false, true, Icon::Folder);
+            y += 40;
+            Hint(L"اللغة: العربية (لغات أخرى لاحقًا)", Theme::Off);
         });
         break;
     }
@@ -4456,6 +4506,33 @@ void OnClick(int id, D2D1_POINT_2F p)
         g_overlay.Toast(Glyph::Check, Theme::Green, L"هكذا تبدو الإشعارات", L"تظهر في زاوية المؤشر ولا تظهر في التسجيل", true);
         return;
     }
+    if (id >= ID_THEME_FIRST && id < ID_THEME_FIRST + Theme::THEME_COUNT)
+    {
+        g_themeChoice = id - ID_THEME_FIRST;
+        Theme::Apply(g_themeChoice, g_accentChoice);
+        SaveSettings();
+        return;
+    }
+    if (id >= ID_ACCENT_FIRST && id < ID_ACCENT_FIRST + Theme::ACCENT_COUNT)
+    {
+        g_accentChoice = id - ID_ACCENT_FIRST;
+        Theme::Apply(g_themeChoice, g_accentChoice);
+        SaveSettings();
+        return;
+    }
+    if (id == ID_ABOUT_GITHUB)
+    {
+        ShellExecuteW(nullptr, L"open", APP_URL, nullptr, nullptr, SW_SHOWNORMAL);
+        return;
+    }
+    if (id == ID_OPEN_CONFIG)
+    {
+        const std::wstring path = ScenesPath();
+        const size_t slash = path.find_last_of(L'\\');
+        if (slash != std::wstring::npos)
+            ShellExecuteW(nullptr, L"open", path.substr(0, slash).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return;
+    }
     if (id >= ID_CLOSE_FIRST && id < ID_CLOSE_FIRST + 2)
     {
         g_closeToTray = (id == ID_CLOSE_FIRST);
@@ -4593,6 +4670,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             os.recording = g_recorder.IsRecording();
             os.paused    = g_recorder.IsPaused();
             os.streaming = g_streamer.IsActive();
+            os.uploadKbps = 0;
+            if (os.streaming)
+                for (const OutputStatus& st : g_streamStatus) os.uploadKbps += st.kbps;
             os.elapsedMs = os.recording ? g_recorder.ElapsedMs() : (os.streaming ? g_streamer.ElapsedMs() : 0);
             os.micOn     = g_micOn && g_micAudio.IsRunning();
             os.micMuted  = g_micAudio.IsMuted();
@@ -4950,6 +5030,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             }
         }
         break;
+
+    case WM_HOTKEY_CAPTURE:       // نافذة الاختصارات: انمسك زر جديد
+        g_hotkeys.OnCaptureMessage(wParam, lParam);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
 
     case WM_HOTKEY:
     {
