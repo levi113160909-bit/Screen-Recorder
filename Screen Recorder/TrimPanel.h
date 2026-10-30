@@ -1,12 +1,14 @@
 // =============================================================
 //  TrimPanel.h - "قصّ سريع" بدون إعادة ضغط
 //
+//  فوق: مشغّل فيديو (صورة وصوت) لحتى تعرف من وين لوين بدك تقص.
 //  شريط فيه صور من الفيديو، وعليه مقبضين: البداية والنهاية.
 //  وانت عم تسحب بتشوف الصورة عند المقبض. "حفظ المقطع" بيعمل ملف جديد
 //  (الأصلي ما بيتغيّر) بثواني، وبنفس الجودة بالضبط.
 // =============================================================
 #pragma once
 #include "Panel.h"
+#include "VideoPlayer.h"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -22,10 +24,11 @@ public:
     std::wstring   Subtitle() const override { return L"بدون إعادة ضغط: فوري وبنفس الجودة"; }
     const wchar_t* IconGlyph() const override { return L""; }
     float          Width() const override    { return 820; }
-    float          BodyHeight() const override { return 560; }
+    float          BodyHeight() const override { return 640; }
     void           DrawBody(float left, float top, float right) override;
     void           OnClick(int id) override;
     bool           OnDrag(int id, D2D1_POINT_2F p) override;
+    bool           OnKeyDown(WPARAM vk) override;
 
 private:
     struct Shared
@@ -56,4 +59,17 @@ private:
     std::vector<ComPtr<ID2D1Bitmap>> m_stripBmp;
     ID2D1HwndRenderTarget* m_owner = nullptr;
     bool         m_notified = false;
+
+    // ---- المشغّل ----
+    LONGLONG Duration();
+    void     TogglePlay();
+    void     SetStartHere();
+    void     SetEndHere();
+    void     SeekBy(LONGLONG delta);
+    std::unique_ptr<VideoPlayer> m_player;           // فاضي = ما اشتغل (منرجع للمعاينة القديمة)
+    ComPtr<ID2D1Bitmap> m_playBmp;
+    std::vector<BYTE>   m_playPx;
+    int          m_playW = 0, m_playH = 0;
+    bool         m_playSelection = false;            // عم نشغّل المقطع المحدد بس (منوقف عند النهاية)
+    D2D1_RECT_F  m_seek{};
 };

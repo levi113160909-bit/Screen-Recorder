@@ -46,6 +46,8 @@ public:
     virtual bool           OnWheel(D2D1_POINT_2F /*p*/, float /*steps*/) { return false; }   // تمرير خاص (true = عالجته)
     // سحب حر بالماوس (مثلاً دائرة الألوان): true = هالعنصر بيتسحب. بينادى عند الكبس وكل حركة
     virtual bool           OnDrag(int /*id*/, D2D1_POINT_2F /*p*/) { return false; }
+    // الصفحة رجعت بيّنت (مثلاً اخترتها من قائمة الإعدادات): فرصة تحدّث محتواها
+    virtual void           OnShow() {}
 
 protected:
     // ---- عناصر جاهزة لكل النوافذ ----
@@ -70,6 +72,15 @@ protected:
     void RequestClose() { m_closeRequested = true; }
     // سكّر النافذة، وبعدها نفّذ شي (مثلاً افتح نافذة تانية أو صندوق اختيار ملف)
     void CloseThen(std::function<void()> fn) { m_afterClose = std::move(fn); m_closeRequested = true; }
+    // صفحة مضمّنة جوّا هالنافذة طلبت تسكير: منمرّر الطلب للنافذة الأم (هي اللي مفتوحة فعلياً)
+    void AdoptClose(Panel& child)
+    {
+        if (!child.m_closeRequested)
+            return;
+        m_closeRequested = true;
+        m_afterClose = std::move(child.m_afterClose);
+        child.m_closeRequested = false;
+    }
 
     // قيمة المنزلق من مكان الماوس
     static float ValueAtX(const D2D1_RECT_F& track, float x, float minV, float maxV, float step);

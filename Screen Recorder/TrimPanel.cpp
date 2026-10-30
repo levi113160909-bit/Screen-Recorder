@@ -3,6 +3,8 @@
 // =============================================================
 #include "TrimPanel.h"
 #include "VideoTools.h"
+#include "Tooltip.h"
+#include "MediaControls.h"
 #include <algorithm>
 #include <thread>
 
@@ -13,8 +15,16 @@ namespace
         ID_TRACK  = ID_PANEL_USER,
         ID_SAVE   = ID_PANEL_USER + 1,
         ID_BACK   = ID_PANEL_USER + 2,
-        ID_CANCEL = ID_PANEL_USER + 3
+        ID_CANCEL = ID_PANEL_USER + 3,
+        ID_SEEK      = ID_PANEL_USER + 4,      // شريط التنقّل تحت الفيديو
+        ID_PLAY      = ID_PANEL_USER + 5,
+        ID_SET_START = ID_PANEL_USER + 6,
+        ID_SET_END   = ID_PANEL_USER + 7,
+        ID_PLAY_SEL  = ID_PANEL_USER + 8,
+        ID_BACK5     = ID_PANEL_USER + 9,
+        ID_FWD5      = ID_PANEL_USER + 10
     };
+    constexpr LONGLONG MIN_LEN = 10'000'000;          // المقطع ثانية على الأقل
     constexpr int STRIP = 10;
 
     std::wstring Clock(LONGLONG t)
@@ -29,6 +39,9 @@ namespace
 TrimPanel::TrimPanel(const std::wstring& path, std::function<void(const std::wstring&)> done, std::function<void()> back)
     : m_path(path), m_done(std::move(done)), m_back(std::move(back))
 {
+    m_player = std::make_unique<VideoPlayer>();
+    if (!m_player->Open(path))
+        m_player.reset();
     auto s = m_s;
     const std::wstring p = path;
     std::thread([s, p]
@@ -98,6 +111,7 @@ void TrimPanel::DrawBody(float L, float top, float R)
             m_previewBmp.Reset();
             m_stripBmp.clear();
             m_previewVer = 0;
+            m_playBmp.Reset();
         }
         const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE));
@@ -114,6 +128,35 @@ void TrimPanel::DrawBody(float L, float top, float R)
             m_stripBmp.push_back(b);
         }
     }
+    // ---- المشغّل: صورة جديدة؟ ----
+    if (m_player && m_player->Failed())
+        m_player.reset();                              // منرجع للمعاينة القديمة
+    if (m_player)
+    {
+        const bool fresh = m_player->Poll(960, m_playPx, m_playW, m_playH);
+        if (!m_playPx.empty() && (fresh || !m_playBmp))
+        {
+            const D2D1_SIZE_U want = D2D1::SizeU(m_playW, m_playH);
+            if (m_playBmp && m_playBmp->GetPixelSize().width == want.width && m_playBmp->GetPixelSize().height == want.height)
+                m_playBmp->CopyFromMemory(nullptr, m_playPx.data(), m_playW * 4);
+            else
+            {
+                m_playBmp.Reset();
+                g_rt->CreateBitmap(want, m_playPx.data(), m_playW * 4,
+                                   D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)),
+                                   &m_playBmp);
+            }
+        }
+    }
+    const LONGLONG pos = m_player ? m_player->Position() : 0;
+    // "تشغيل المقطع": منوقف عند النهاية
+    if (m_player && m_playSelection && m_player->Playing() && pos >= m_end && m_end > 0)
+    {
+        m_player->Pause();
+        m_player->Seek(m_end);
+        m_playSelection = false;
+    }
+
     if (dur > 0 && m_end == 0)
     {
         m_end = dur;
@@ -122,25 +165,74 @@ void TrimPanel::DrawBody(float L, float top, float R)
     }
 
     float y = top;
-    // ---- المعاينة ----
-    const float ph = 300, pw = ph * 16 / 9;
+    const float tl = L + 8, tr = R - 8;
+    const bool  busy = m_s->progress >= 0 && m_s->progress <= 100;
+    // ---- المعاينة / المشغّل ----
+    const float ph = 290, pw = ph * 16 / 9;
     const float cx = (L + R) / 2;
     const D2D1_RECT_F pv = Rect(cx - pw / 2, y, cx + pw / 2, y + ph);
     Fill(pv, D2D1::ColorF(0x000000), 10);
-    if (m_previewBmp)
+    ID2D1Bitmap* shown = m_player && m_playBmp ? m_playBmp.Get() : m_previewBmp.Get();
+    if (shown)
     {
-        const D2D1_SIZE_F sz = m_previewBmp->GetSize();
+        const D2D1_SIZE_F sz = shown->GetSize();
         const float s = std::min(pw / sz.width, ph / sz.height);
-        g_rt->DrawBitmap(m_previewBmp.Get(), Rect(cx - sz.width * s / 2, y + ph / 2 - sz.height * s / 2,
-                                                   cx + sz.width * s / 2, y + ph / 2 + sz.height * s / 2), 1.0f,
+        g_rt->DrawBitmap(shown, Rect(cx - sz.width * s / 2, y + ph / 2 - sz.height * s / 2,
+                                     cx + sz.width * s / 2, y + ph / 2 + sz.height * s / 2), 1.0f,
                          D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     }
     else
         Text(dur > 0 ? L"…" : L"جارٍ قراءة الفيديو…", g_fCenter.Get(), pv, Theme::SubText);
-    y += ph + 16;
+    if (m_player && !busy)       // كبسة على الفيديو = تشغيل / إيقاف
+    {
+        AddHit(pv, ID_PLAY);
+        Tip(ID_PLAY, m_player->Playing() ? L"إيقاف مؤقت (مسافة)" : L"تشغيل (مسافة)");
+    }
+    y += ph + 12;
+
+    // ---- شريط التنقّل + أزرار التشغيل ----
+    if (m_player)
+    {
+        m_seek = Rect(tl, y, tr, y + 16);
+        const float my = y + 8;
+        AddHit(Rect(tl - 6, y - 4, tr + 6, y + 20), ID_SEEK);
+        Tip(ID_SEEK, L"اسحب للتنقّل في الفيديو");
+        Fill(Rect(tl, my - 2, tr, my + 2), Theme::Border, 2);
+        if (dur > 0)
+        {
+            const float xs = tl + (tr - tl) * (float)m_start / dur, xe = tl + (tr - tl) * (float)m_end / dur;
+            Fill(Rect(xs, my - 2, xe, my + 2), WithAlpha(Theme::Accent, 0.45f), 2);   // المقطع المحدد
+            const float xp = tl + (tr - tl) * std::clamp((float)pos / dur, 0.0f, 1.0f);
+            Fill(Rect(tl, my - 2, xp, my + 2), Theme::Accent, 2);
+            Circle(xp, my, 7, Theme::White);
+        }
+        y += 26;
+
+        // من اليسار لليمين: [البداية هنا]   [-5] [▶] [+5]  الوقت   [النهاية هنا]
+        const float by = y, bh = 36, bcy = by + bh / 2;
+        DrawButton(Rect(tl, by, tl + 130, by + bh), L"البداية هنا", ID_SET_START, false, !busy && dur > 0);
+        Tip(ID_SET_START, L"اجعل بداية المقطع عند هذه اللحظة (I)");
+        DrawButton(Rect(tr - 130, by, tr, by + bh), L"النهاية هنا", ID_SET_END, false, !busy && dur > 0);
+        Tip(ID_SET_END, L"اجعل نهاية المقطع عند هذه اللحظة (O)");
+
+        const D2D1_RECT_F play = Rect(cx - 20, bcy - 20, cx + 20, bcy + 20);
+        DrawPlayButton(cx, bcy, 20, m_player->Playing(), AddHit(play, ID_PLAY), !busy);
+
+        const struct { int id; float x; const wchar_t* label; const wchar_t* tip; } jumps[] = {
+            { ID_BACK5, cx - 58, L"-5", L"رجوع 5 ثوانٍ (←: ثانية)" },
+            { ID_FWD5,  cx + 58, L"+5", L"تقديم 5 ثوانٍ (→: ثانية)" } };
+        for (const auto& j : jumps)
+        {
+            const D2D1_RECT_F r = Rect(j.x - 17, bcy - 17, j.x + 17, bcy + 17);
+            DrawJumpButton(j.x, bcy, 17, j.id == ID_FWD5 ? 5 : -5, AddHit(r, j.id), !busy);
+            Tip(j.id, j.tip);
+        }
+        Text(LtrText(Clock(pos) + L" / " + Clock(dur)), g_fSmallEnd.Get(), Rect(cx + 84, by, tr - 140, by + bh), Theme::SubText);
+        y += bh + 14;
+    }
 
     // ---- الشريط (الزمن من اليسار لليمين متل كل مشغّلات الفيديو) ----
-    const float tl = L + 8, tr = R - 8, th = 56;
+    const float th = 56;
     m_track = Rect(tl, y, tr, y + th);
     Fill(m_track, Theme::Background, 8);
     const float cellW = (tr - tl) / STRIP;
@@ -160,6 +252,11 @@ void TrimPanel::DrawBody(float L, float top, float R)
         {
             const float hx = k == 0 ? xs : xe;
             Fill(Rect(hx - 6, y - 6, hx + 6, y + th + 6), m_active == k ? Theme::Accent : Theme::White, 4);
+        }
+        if (m_player)            // وين وصل التشغيل
+        {
+            const float xp = tl + (tr - tl) * std::clamp((float)pos / dur, 0.0f, 1.0f);
+            Fill(Rect(xp - 1, y - 3, xp + 1, y + th + 3), Theme::Red);
         }
         y += th + 12;
         Text(L"البداية " + LtrText(Clock(m_start)), g_fBody.Get(), Rect(tl, y, tl + 220, y + 22), Theme::Text);
@@ -188,6 +285,11 @@ void TrimPanel::DrawBody(float L, float top, float R)
             Text(L"تعذّر حفظ المقطع", g_fSmall.Get(), Rect(tl, y, tr, y + 18), Theme::Red);
         DrawButton(Rect(R - 160, y + 24, R, y + 58), L"حفظ المقطع", ID_SAVE, true, dur > 0 && m_end > m_start);
         DrawButton(Rect(R - 290, y + 24, R - 170, y + 58), L"رجوع", ID_BACK, false, true);
+        if (m_player)
+        {
+            DrawButton(Rect(L, y + 24, L + 170, y + 58), L"تشغيل المقطع", ID_PLAY_SEL, false, dur > 0, Icon::Play);
+            Tip(ID_PLAY_SEL, L"شغّل من البداية إلى النهاية المحددتين لتتأكد قبل الحفظ");
+        }
     }
     if (prog == 101 && !m_notified)
     {
@@ -209,11 +311,21 @@ bool TrimPanel::OnDrag(int id, D2D1_POINT_2F p)
         std::lock_guard<std::mutex> lock(m_s->mutex);
         dur = m_s->duration;
     }
+    if (id == ID_SEEK)
+    {
+        if (m_player && dur > 0 && m_s->progress < 0)
+        {
+            const float f = std::clamp((p.x - m_seek.left) / (m_seek.right - m_seek.left), 0.0f, 1.0f);
+            m_player->Seek((LONGLONG)(f * dur));
+            m_playSelection = false;
+        }
+        return true;
+    }
     if (id != ID_TRACK || dur <= 0 || m_s->progress >= 0)
         return id == ID_TRACK;
     const float f = std::clamp((p.x - m_track.left) / (m_track.right - m_track.left), 0.0f, 1.0f);
     const LONGLONG t = (LONGLONG)(f * dur);
-    const LONGLONG minLen = 10'000'000;                // ثانية على الأقل
+    const LONGLONG minLen = MIN_LEN;
     // أقرب مقبض للماوس هو اللي بيتحرك
     if (std::llabs(t - m_start) < std::llabs(t - m_end) || (t < m_start))
     {
@@ -225,9 +337,79 @@ bool TrimPanel::OnDrag(int id, D2D1_POINT_2F p)
         m_end = std::clamp<LONGLONG>(t, std::min(dur, m_start + minLen), dur);
         m_active = 1;
     }
+    const LONGLONG at = m_active == 0 ? m_start : std::max<LONGLONG>(0, m_end - 1'000'000);
+    if (m_player)            // المشغّل بيوقف ويبيّن الإطار عند المقبض
+    {
+        m_player->Pause();
+        m_player->Seek(at);
+        m_playSelection = false;
+        return true;
+    }
     std::lock_guard<std::mutex> lock(m_s->mutex);
-    m_s->wantTime = m_active == 0 ? m_start : std::max<LONGLONG>(0, m_end - 1'000'000);
+    m_s->wantTime = at;
     return true;
+}
+
+// ---- المشغّل ----
+LONGLONG TrimPanel::Duration()
+{
+    std::lock_guard<std::mutex> lock(m_s->mutex);
+    return m_s->duration;
+}
+
+void TrimPanel::TogglePlay()
+{
+    if (!m_player || m_s->progress >= 0)
+        return;
+    if (m_player->Playing())
+    {
+        m_player->Pause();
+        m_playSelection = false;
+    }
+    else
+        m_player->Play();
+}
+
+void TrimPanel::SetStartHere()
+{
+    const LONGLONG dur = Duration();
+    if (!m_player || dur <= 0 || m_s->progress >= 0)
+        return;
+    m_start  = std::clamp<LONGLONG>(m_player->Position(), 0, std::max<LONGLONG>(0, m_end - MIN_LEN));
+    m_active = 0;
+}
+
+void TrimPanel::SetEndHere()
+{
+    const LONGLONG dur = Duration();
+    if (!m_player || dur <= 0 || m_s->progress >= 0)
+        return;
+    m_end    = std::clamp<LONGLONG>(m_player->Position(), std::min(dur, m_start + MIN_LEN), dur);
+    m_active = 1;
+}
+
+void TrimPanel::SeekBy(LONGLONG delta)
+{
+    const LONGLONG dur = Duration();
+    if (!m_player || dur <= 0 || m_s->progress >= 0)
+        return;
+    m_player->Seek(std::clamp<LONGLONG>(m_player->Position() + delta, 0, dur));
+    m_playSelection = false;
+}
+
+bool TrimPanel::OnKeyDown(WPARAM vk)
+{
+    if (!m_player)
+        return false;
+    switch (vk)
+    {
+    case VK_SPACE: TogglePlay();          return true;
+    case VK_LEFT:  SeekBy(-10'000'000);   return true;     // الزمن من اليسار لليمين
+    case VK_RIGHT: SeekBy(10'000'000);    return true;
+    case 'I':      SetStartHere();        return true;
+    case 'O':      SetEndHere();          return true;
+    }
+    return false;
 }
 
 void TrimPanel::OnClick(int id)
@@ -239,6 +421,17 @@ void TrimPanel::OnClick(int id)
     }
     else if (id == ID_CANCEL)
         m_s->cancel = true;
+    else if (id == ID_PLAY)      TogglePlay();
+    else if (id == ID_SET_START) SetStartHere();
+    else if (id == ID_SET_END)   SetEndHere();
+    else if (id == ID_BACK5)     SeekBy(-50'000'000);
+    else if (id == ID_FWD5)      SeekBy(50'000'000);
+    else if (id == ID_PLAY_SEL && m_player && m_s->progress < 0 && m_end > m_start)
+    {
+        m_player->Seek(m_start);
+        m_player->Play();
+        m_playSelection = true;
+    }
     else if (id == ID_SAVE && m_s->progress < 0)
     {
         // اسم جديد جنب الأصلي: "..._مقطع.mp4" (وإذا موجود: رقم)
@@ -256,6 +449,8 @@ void TrimPanel::OnClick(int id)
         }
         m_s->cancel = false;
         m_s->progress = 0;
+        if (m_player)
+            m_player->Pause();          // ما في داعي يضل شغّال وقت الحفظ
         auto s = m_s;
         const std::wstring in = m_path;
         const LONGLONG a = m_start, b = m_end;

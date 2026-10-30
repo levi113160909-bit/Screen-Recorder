@@ -52,6 +52,8 @@
 #include "GameDetect.h"
 #include "FirstRunPanel.h"
 #include "SettingsPanel.h"
+#include "Tooltip.h"
+#include "PlayerPanel.h"
 #include "BrowserSource.h"
 #include "VirtualCam.h"
 #include <shobjidl.h>
@@ -312,10 +314,18 @@ constexpr float MENU_ITEM_H = 34, MENU_SEP_H = 9, MENU_PAD = 6;
 // أيقونة المنصة (معرّفة تحت) - منستعملها بالقوائم كمان
 void DrawPlatformIcon(int platform, const D2D1_RECT_F& r, bool enabled);
 
+// أيقونة خيار بالقائمة: الرمز ، و danger = أحمر (خروج ، إيقاف)
+struct MenuGlyph
+{
+    const wchar_t* glyph = nullptr;
+    bool           danger = false;
+};
+
 struct MenuState
 {
     std::vector<std::wstring> items;
     std::vector<int>          icons;     // أيقونة منصة لكل خيار (-1 = بلا)
+    std::vector<MenuGlyph>    glyphs;    // أيقونة (Segoe MDL2) لكل خيار (فاضي = بلا)
     int   checked = -1;
     int   hover   = -1;
     int   result  = -1;
@@ -389,7 +399,17 @@ void PaintMenu(HWND hwnd, MenuState& m)
             Text(L"\uE73E", g_fIcon.Get(), Rect(row.right - 32, row.top, row.right - 6, row.bottom), Theme::Accent);
         }
         float textRight = row.right - 36;
-        if (i < (int)m.icons.size() && m.icons[i] >= 0)
+        if (i < (int)m.glyphs.size() && m.glyphs[i].glyph)
+        {
+            // أيقونة بمربع صغير مدوّر (متل أزرار المعرض)
+            const float cy = (row.top + row.bottom) / 2;
+            const D2D1_RECT_F box = Rect(row.right - 38, cy - 13, row.right - 12, cy + 13);
+            const D2D1_COLOR_F tone = m.glyphs[i].danger ? Theme::Red : Theme::Accent;
+            Fill(box, WithAlpha(tone, i == m.hover ? 0.28f : 0.16f), 7);
+            Text(m.glyphs[i].glyph, g_fIcon.Get(), box, tone);
+            textRight = row.right - 48;
+        }
+        else if (i < (int)m.icons.size() && m.icons[i] >= 0)
         {
             const float cy = (row.top + row.bottom) / 2;
             DrawPlatformIcon(m.icons[i], Rect(row.right - 34, cy - 12, row.right - 10, cy + 12), true);
@@ -484,11 +504,13 @@ LRESULT CALLBACK MenuProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-int ShowMenu(const std::vector<std::wstring>& items, int checked, POINT screenPt, const std::vector<int>& icons = {})
+int ShowMenu(const std::vector<std::wstring>& items, int checked, POINT screenPt, const std::vector<int>& icons = {},
+             const std::vector<MenuGlyph>& glyphs = {})
 {
     MenuState m;
     m.items   = items;
     m.icons   = icons;
+    m.glyphs  = glyphs;
     m.checked = checked;
 
     // دقة الشاشة اللي عليها النقطة
@@ -516,7 +538,7 @@ int ShowMenu(const std::vector<std::wstring>& items, int checked, POINT screenPt
             textW = std::max(textW, tm.widthIncludingTrailingWhitespace);
         }
     }
-    const float wDip = std::clamp(textW + 60 + MENU_PAD * 2, 200.0f, 560.0f);
+    const float wDip = std::clamp(textW + (glyphs.empty() ? 60.0f : 72.0f) + MENU_PAD * 2, 200.0f, 560.0f);
     const float hDip = MenuItemTop(m, (int)items.size()) + MENU_PAD;
     const int   w = (int)(wDip * m.dpi / 96.0f);
     const int   h = (int)(hDip * m.dpi / 96.0f);
@@ -3569,18 +3591,20 @@ void ShowMicFilters()
 // ---------- المعرض والقص ----------
 void OpenGallery();
 void OpenFolder();
-void OpenTrim(const std::wstring& path)
+void OpenSettings(int page);
+// نافذة القص. back = وين نرجع بعدها (المعرض لحالو، أو صفحة المعرض بالإعدادات)
+void OpenTrim(const std::wstring& path, std::function<void()> back)
 {
     g_panels.Open(std::make_unique<TrimPanel>(path,
-        [](const std::wstring& out)
+        [back](const std::wstring& out)
         {
             Notify(Glyph::Check, Theme::Green, L"حُفظ المقطع", FileNameOf(out));
-            OpenGallery();
+            back();
         },
-        [] { OpenGallery(); }));
+        [back] { back(); }));
 }
 
-void OpenGallery()
+std::unique_ptr<Panel> MakeGalleryPanel(std::function<void()> back)
 {
     GalleryHooks h;
     h.folders = []
@@ -3592,10 +3616,22 @@ void OpenGallery()
             f.push_back({ replay, 1 });
         return f;
     };
-    h.trim       = [](const std::wstring& p) { OpenTrim(p); };
+    h.trim       = [back](const std::wstring& p) { OpenTrim(p, back); };
+    h.play       = [back](const std::wstring& p, bool image)
+    {
+        PlayerHooks ph;
+        ph.trim = [back](const std::wstring& path) { OpenTrim(path, back); };
+        ph.back = back;
+        g_panels.Open(std::make_unique<PlayerPanel>(p, image, std::move(ph)));
+    };
     h.rename     = [](std::wstring& name) { return InputBox(L"الاسم الجديد", name, false, false, 120); };
     h.openFolder = [] { OpenFolder(); };
-    g_panels.Open(std::make_unique<GalleryPanel>(std::move(h)));
+    return std::make_unique<GalleryPanel>(std::move(h));
+}
+
+void OpenGallery()
+{
+    g_panels.Open(MakeGalleryPanel([] { OpenGallery(); }));
 }
 
 void OpenFolder()
@@ -3724,6 +3760,7 @@ void DrawPreview(const D2D1_RECT_F& area)
     }
     const D2D1_RECT_F addScene = Rect(sx - 34, sy, sx, sy + sh);
     Fill(addScene, AddHit(addScene, ID_ADD_SCENE) ? Theme::Hover : Theme::Card, 9);
+    Tip(ID_ADD_SCENE, L"مشهد جديد");
     Text(Icon::Add, g_fIcon.Get(), addScene, Theme::SubText);
     g_rt->PopAxisAlignedClip();
 
@@ -3833,6 +3870,7 @@ void DrawAudioRow(const D2D1_RECT_F& r, const wchar_t* icon, const wchar_t* titl
     const D2D1_RECT_F mute = Rect(r.right - 46, r.top + 6, r.right - 8, r.top + 40);
     if (AddHit(mute, muteId))
         Fill(mute, Theme::Hover, 8);
+    Tip(muteId, muted ? L"إلغاء الكتم" : L"كتم");
     Text(muted ? Icon::Muted : icon, g_fIconBig.Get(), mute,
          muted ? Theme::Red : (on ? Theme::Text : Theme::SubText));
     // المايك: زر الفلاتر جنب زر الجهاز
@@ -3841,6 +3879,7 @@ void DrawAudioRow(const D2D1_RECT_F& r, const wchar_t* icon, const wchar_t* titl
     {
         const bool anyFilter = src.Filters().Any();
         const D2D1_RECT_F fb = Rect(r.left + 94, r.top + 9, r.left + 126, r.top + 41);
+        Tip(ID_MIC_FILTERS, L"فلاتر الميكروفون (إزالة الضجيج وغيرها)");
         if (AddHit(fb, ID_MIC_FILTERS))
             Fill(fb, Theme::Hover, 8);
         else if (anyFilter)
@@ -3866,12 +3905,14 @@ void DrawAudioRow(const D2D1_RECT_F& r, const wchar_t* icon, const wchar_t* titl
     // مفتاح التشغيل
     const D2D1_RECT_F toggle = Rect(r.left + 10, r.top + 12, r.left + 54, r.top + 38);
     AddHit(toggle, toggleId);
+    Tip(toggleId, on ? L"تعطيل المصدر" : L"تفعيل المصدر");
     DrawToggle(r.left + 12, r.top + 13, on, !locked);
 
     // زر اختيار الجهاز
     const D2D1_RECT_F dev = Rect(r.left + 58, r.top + 9, r.left + 90, r.top + 41);
     if (AddHit(dev, deviceId) && !locked)
         Fill(dev, Theme::Hover, 8);
+    Tip(deviceId, L"اختيار الجهاز");
     Text(Icon::Chevron, g_fIcon.Get(), dev, locked ? Theme::Off : Theme::SubText);
 
     // ---- شريط العلو + مؤشر الصوت جوّاته ----
@@ -3932,6 +3973,8 @@ void DrawAppAudioRow(const D2D1_RECT_F& row, int i)
     const bool hover     = AddHit(row, ID_APP_ROW_FIRST + i);
     const bool delHover  = AddHit(del, ID_APP_DELETE_FIRST + i);
     const bool muteHover = AddHit(mute, ID_APP_MUTE_FIRST + i);
+    Tip(ID_APP_DELETE_FIRST + i, L"إزالة البرنامج من الخلّاط");
+    Tip(ID_APP_MUTE_FIRST + i, e.muted ? L"إلغاء الكتم" : L"كتم");
 
     Fill(row, hover ? Theme::Hover : Theme::Card, 10);
     Text(Icon::Speaker, g_fIconBig.Get(), Rect(row.right - 44, row.top + 2, row.right - 10, row.top + 40),
@@ -4022,6 +4065,8 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
         const bool hover = AddHit(vis, ID_LAYER_FIRST + l.id);
         const bool delHover = AddHit(del, ID_DELETE_FIRST + l.id);
         const bool eyeHover = AddHit(eye, ID_EYE_FIRST + l.id);
+        Tip(ID_DELETE_FIRST + l.id, L"حذف المصدر");
+        Tip(ID_EYE_FIRST + l.id, l.visible ? L"إخفاء المصدر" : L"إظهار المصدر");
 
         if (selected)
         {
@@ -4603,11 +4648,13 @@ void DrawStreamTab(const D2D1_RECT_F& side, float y)
         // مفتاح التفعيل + زر القائمة
         const D2D1_RECT_F toggle = Rect(row.left + 10, row.top + 18, row.left + 54, row.top + 44);
         AddHit(toggle, ID_TARGET_TOGGLE_FIRST + i);
+        Tip(ID_TARGET_TOGGLE_FIRST + i, t.enabled ? L"إيقاف البث على هذه المنصة" : L"تفعيل البث على هذه المنصة");
         DrawToggle(row.left + 12, row.top + 19, t.enabled, !live);
 
         const D2D1_RECT_F more = Rect(row.left + 58, row.top + 15, row.left + 90, row.top + 47);
         if (AddHit(more, ID_TARGET_MENU_FIRST + i) && !live)
             Fill(more, Theme::Hover, 8);
+        Tip(ID_TARGET_MENU_FIRST + i, L"خيارات المنصة");
         Text(Icon::More, g_fIcon.Get(), more, live ? Theme::Off : Theme::SubText);
     }
     g_rt->PopAxisAlignedClip();
@@ -4701,6 +4748,7 @@ void DrawBottomBar(const D2D1_RECT_F& bar)
     const float R = 26;
     const D2D1_RECT_F recRect = Rect(cx - R, cy - R, cx + R, cy + R);
     Circle(cx, cy, R, AddHit(recRect, ID_RECORD) ? Theme::RedHover : Theme::Red);
+    Tip(ID_RECORD, rec ? L"إيقاف التسجيل" : L"بدء التسجيل");
     if (rec) Fill(Rect(cx - 9, cy - 9, cx + 9, cy + 9), Theme::White, 3);   // مربع = إيقاف
     else     Circle(cx, cy, 10, Theme::White);                               // دائرة = تسجيل
 
@@ -4708,6 +4756,7 @@ void DrawBottomBar(const D2D1_RECT_F& bar)
     const float pr = 20, px = cx - 66;
     const D2D1_RECT_F pauseRect = Rect(px - pr, cy - pr, px + pr, cy + pr);
     Circle(px, cy, pr, AddHit(pauseRect, ID_PAUSE) && rec ? Theme::Hover : Theme::Card);
+    Tip(ID_PAUSE, !rec ? L"إيقاف مؤقت (أثناء التسجيل)" : (paused ? L"استئناف التسجيل" : L"إيقاف مؤقت"));
     Text(paused ? Icon::Play : Icon::Pause, g_fIcon.Get(), pauseRect,
          rec ? (paused ? Theme::Yellow : Theme::Text) : Theme::Off);
 
@@ -4722,14 +4771,19 @@ void DrawBottomBar(const D2D1_RECT_F& bar)
     Text(streaming ? L"إيقاف البث" : L"بدء البث", g_fCenter.Get(), Rect(live.left + 8, live.top, live.right - 40, live.bottom),
          streaming ? Theme::White : Theme::Text);
 
-    // زر المعرض (التسجيلات واللقطات والصور)
-    const D2D1_RECT_F folder = Rect(bar.left + 16, cy - 20, bar.left + 56, cy + 20);
-    Fill(folder, AddHit(folder, ID_FOLDER) ? Theme::Hover : Theme::Card, 10);
-    Text(L"\uE8B9", g_fIcon.Get(), folder, Theme::SubText);
+    // زر المعرض (التسجيلات واللقطات والصور): أيقونة وتحتها كلمة "المعرض"
+    const D2D1_RECT_F folder = Rect(bar.left + 12, cy - 27, bar.left + 70, cy + 27);
+    const bool folderHover = AddHit(folder, ID_FOLDER);
+    Fill(folder, folderHover ? Theme::Hover : Theme::Card, 10);
+    Tip(ID_FOLDER, L"تسجيلاتك ولقطاتك وصورك");
+    Text(L"\uE8B9", g_fIcon.Get(), Rect(folder.left, folder.top + 6, folder.right, folder.top + 30),
+         folderHover ? Theme::Text : Theme::SubText);
+    Text(L"المعرض", g_fSegment.Get(), Rect(folder.left, folder.top + 30, folder.right, folder.bottom - 4),
+         folderHover ? Theme::Text : Theme::SubText);
 
     // زر الإعادة: مطفي = "تشغيل الإعادة" ، شغّال = "حفظ الإعادة" + زر صغير للإيقاف
     const bool replayOn = g_replay.IsActive();
-    const D2D1_RECT_F rb = Rect(bar.left + 64, cy - 20, bar.left + 222, cy + 20);
+    const D2D1_RECT_F rb = Rect(bar.left + 78, cy - 20, bar.left + 236, cy + 20);
     const bool rbHover = AddHit(rb, ID_REPLAY);
     if (replayOn) Fill(rb, rbHover ? WithAlpha(Theme::Accent, 0.32f) : WithAlpha(Theme::Accent, 0.18f), 10);
     else          Fill(rb, rbHover ? Theme::Hover : Theme::Card, 10);
@@ -4739,6 +4793,7 @@ void DrawBottomBar(const D2D1_RECT_F& bar)
         const D2D1_RECT_F stop = Rect(rb.left + 4, cy - 14, rb.left + 32, cy + 14);
         if (AddHit(stop, ID_REPLAY_STOP))
             Fill(stop, D2D1::ColorF(0xE5484D, 0.25f), 7);
+        Tip(ID_REPLAY_STOP, L"إيقاف الإعادة");
         Text(Icon::Close, g_fIcon.Get(), stop, Theme::SubText);
         Text(L"حفظ الإعادة", g_fCenter.Get(), Rect(rb.left + 32, rb.top, rb.right - 36, rb.bottom), Theme::Text);
     }
@@ -4809,6 +4864,7 @@ void Paint()
         return;
 
     g_hits.clear();
+    BeginTooltips();
     g_rt->BeginDraw();
     g_rt->Clear(Theme::Background);
 
@@ -4829,6 +4885,7 @@ void Paint()
 
     g_mouse = realMouse;
     g_panels.Draw(W, H);     // النافذة الداخلية فوق كلشي
+    DrawTooltip(W, H);       // التلميح فوق كلشي
 
     if (g_rt->EndDraw() == D2DERR_RECREATE_TARGET)
         DiscardRenderTarget();
@@ -5085,22 +5142,27 @@ void ShowTrayMenu(POINT pt)
     const bool rec = g_recorder.IsRecording(), live = g_streamer.IsActive(), replay = g_replay.IsActive();
     std::vector<std::wstring> items;
     std::vector<int> codes;
-    auto add = [&](const std::wstring& t, int c) { items.push_back(t); codes.push_back(c); };
-    add(L"فتح مسجّل الشاشة", 0);
-    add(L"الإعدادات", 6);
+    std::vector<MenuGlyph> glyphs;
+    auto add = [&](const std::wstring& t, int c, const wchar_t* g = nullptr, bool danger = false)
+    {
+        items.push_back(t); codes.push_back(c); glyphs.push_back({ g, danger });
+    };
+    add(L"فتح مسجّل الشاشة", 0, L"\uE8A7");
+    add(L"المعرض", 7, L"\uE8B9");
+    add(L"الإعدادات", 6, Icon::Settings);
     add(L"", -1);
-    add(rec ? L"إيقاف التسجيل" : L"بدء التسجيل", 1);
+    add(rec ? L"إيقاف التسجيل" : L"بدء التسجيل", 1, rec ? L"\uE71A" : L"\uE7C8", rec);
     if (rec)
-        add(g_recorder.IsPaused() ? L"استئناف التسجيل" : L"إيقاف مؤقت", 2);
-    add(live ? L"إيقاف البث" : L"بدء البث", 3);
+        add(g_recorder.IsPaused() ? L"استئناف التسجيل" : L"إيقاف مؤقت", 2, g_recorder.IsPaused() ? Icon::Play : Icon::Pause);
+    add(live ? L"إيقاف البث" : L"بدء البث", 3, live ? L"\uE71A" : Icon::Live, live);
     if (replay)
-        add(L"حفظ الإعادة", 4);
-    add(replay ? L"إيقاف الإعادة" : L"تشغيل الإعادة", 5);
+        add(L"حفظ الإعادة", 4, L"\uE74E");
+    add(replay ? L"إيقاف الإعادة" : L"تشغيل الإعادة", 5, replay ? L"\uE71A" : Icon::Replay, replay);
     add(L"", -1);
-    add(L"خروج", 9);
+    add(L"خروج", 9, L"\uE7E8", true);
 
     SetForegroundWindow(g_hwnd);     // لازم لحتى تتسكّر القائمة لما تكبس برّاها
-    const int pick = ShowMenu(items, -1, pt);
+    const int pick = ShowMenu(items, -1, pt, {}, glyphs);
     if (pick < 0 || codes[pick] < 0)
         return;
     switch (codes[pick])
@@ -5112,6 +5174,7 @@ void ShowTrayMenu(POINT pt)
     case 4: SaveReplay(); break;
     case 5: if (replay) StopReplay(); else StartReplay(); break;
     case 6: ShowFromTray(); OpenSettings(g_settingsPage); break;
+    case 7: ShowFromTray(); OpenGallery(); break;
     case 9: QuitApp(); break;
     }
 }
@@ -5201,7 +5264,8 @@ void OpenSettings(int page)
         OnClick(id, D2D1::Point2F(pt.x * k, pt.y * k));
     };
     g_settingsPage = page;
-    g_panels.Open(std::make_unique<SettingsPanel>(std::move(h), MakeReplayPanel(), MakeHotkeysPanel(), page));
+    g_panels.Open(std::make_unique<SettingsPanel>(std::move(h), MakeReplayPanel(), MakeHotkeysPanel(),
+                                                  MakeGalleryPanel([] { OpenSettings(SP_GALLERY); }), page));
 }
 
 void OnClick(int id, D2D1_POINT_2F p)
@@ -5625,7 +5689,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_GETMINMAXINFO:
     {
         auto* mm = (MINMAXINFO*)lParam;
-        mm->ptMinTrackSize.x = MulDiv(980, g_dpi, 96);
+        mm->ptMinTrackSize.x = MulDiv(1030, g_dpi, 96);   // زر المعرض صار فيه كلمة: لحتى ما يلمس زر الإعادة زر البث
         mm->ptMinTrackSize.y = MulDiv(760, g_dpi, 96);
         return 0;
     }

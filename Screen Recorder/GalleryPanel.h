@@ -3,7 +3,7 @@
 //
 //  صور مصغّرة بتنحمّل بالخلفية (ما بتعلّق البرنامج)، مع المدة والحجم.
 //  فوق: فلتر (الكل / التسجيلات / الإعادات / البث / الصور).
-//  على كل بطاقة: تشغيل، قصّ، إعادة تسمية، إظهار بالمجلد، حذف (لسلة المحذوفات).
+//  على كل بطاقة: تشغيل (جوّا البرنامج)، قصّ، إعادة تسمية، إظهار بالمجلد، حذف (لسلة المحذوفات).
 // =============================================================
 #pragma once
 #include "Panel.h"
@@ -17,6 +17,7 @@ struct GalleryHooks
 {
     // المجلدات: {المسار، النوع} النوع: 0 تسجيل ، 1 إعادة ، 2 بث ، 3 صورة
     std::function<std::vector<std::pair<std::wstring, int>>()> folders;
+    std::function<void(const std::wstring&, bool image)> play;   // المشغّل / عارض الصور (جوّا البرنامج)
     std::function<void(const std::wstring&)> trim;         // فتح نافذة القص
     std::function<bool(std::wstring&)>       rename;       // اسم جديد (بلا الامتداد) ، false = إلغاء
     std::function<void()>                    openFolder;
@@ -35,6 +36,7 @@ public:
     float          BodyHeight() const override { return m_height; }
     void           DrawBody(float left, float top, float right) override;
     void           OnClick(int id) override;
+    void           OnShow() override { Refresh(); }
 
     void Refresh();
 

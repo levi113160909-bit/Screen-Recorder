@@ -150,6 +150,10 @@
 
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="MediaControls.cpp" />
+    <ClCompile Include="PlayerPanel.cpp" />
+    <ClCompile Include="VideoPlayer.cpp" />
+    <ClCompile Include="Tooltip.cpp" />
     <ClCompile Include="VirtualCam.cpp" />
     <ClCompile Include="BrowserSource.cpp" />
     <ClCompile Include="FirstRunPanel.cpp" />
@@ -208,6 +212,10 @@
     <ClInclude Include="AudioFilters.h" />
     <ClInclude Include="Replay.h" />
     <ClInclude Include="Ui.h" />
+    <ClInclude Include="MediaControls.h" />
+    <ClInclude Include="PlayerPanel.h" />
+    <ClInclude Include="VideoPlayer.h" />
+    <ClInclude Include="Tooltip.h" />
     <ClInclude Include="VirtualCam.h" />
     <ClInclude Include="BrowserSource.h" />
     <ClInclude Include="FirstRunPanel.h" />

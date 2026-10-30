@@ -17,11 +17,15 @@ namespace
         { 0xE765, L"الاختصارات",         L"تعمل حتى داخل الألعاب وأنت خارج البرنامج" },
         { 0xEA8F, L"المؤشر والإشعارات", L"ما يظهر على الشاشة أثناء التسجيل (ولا يظهر في الفيديو)" },
         { 0xE771, L"عام",                L"الإغلاق، التشغيل مع ويندوز، والانتقال بين المشاهد" },
+        { 0xE8B9, L"المعرض",             L"تسجيلاتك وإعاداتك وبثوثك وصورك: شغّل، قصّ، أعد التسمية أو احذف" },
     };
+    // ترتيب القائمة على الشاشة (المعرض أول وحدة، وتحته خط فاصل)
+    const int ORDER[SP_COUNT] = { SP_GALLERY, SP_RECORDING, SP_STREAM, SP_REPLAY, SP_HOTKEYS, SP_OVERLAY, SP_GENERAL };
 }
 
-SettingsPanel::SettingsPanel(SettingsHooks hooks, std::unique_ptr<Panel> replay, std::unique_ptr<Panel> hotkeys, int page)
-    : m_hooks(std::move(hooks)), m_replay(std::move(replay)), m_hotkeys(std::move(hotkeys)),
+SettingsPanel::SettingsPanel(SettingsHooks hooks, std::unique_ptr<Panel> replay, std::unique_ptr<Panel> hotkeys,
+                             std::unique_ptr<Panel> gallery, int page)
+    : m_hooks(std::move(hooks)), m_replay(std::move(replay)), m_hotkeys(std::move(hotkeys)), m_gallery(std::move(gallery)),
       m_page(std::clamp(page, 0, SP_COUNT - 1))
 {
 }
@@ -30,6 +34,7 @@ Panel* SettingsPanel::Embedded() const
 {
     if (m_page == SP_REPLAY)  return m_replay.get();
     if (m_page == SP_HOTKEYS) return m_hotkeys.get();
+    if (m_page == SP_GALLERY) return m_gallery.get();
     return nullptr;
 }
 
@@ -40,8 +45,9 @@ void SettingsPanel::DrawBody(float L, float top, float R)
     // ---- القائمة (يمين) ----
     const float navL = R - NAV_W;
     float y = top;
-    for (int i = 0; i < SP_COUNT; ++i)
+    for (int k = 0; k < SP_COUNT; ++k)
     {
+        const int i = ORDER[k];
         const D2D1_RECT_F row = Rect(navL, y, R, y + 46);
         const bool sel = (i == m_page);
         const bool hover = AddHit(row, ID_NAV_FIRST + i);
@@ -54,6 +60,11 @@ void SettingsPanel::DrawBody(float L, float top, float R)
         Text(PAGES[i].name, g_fBody.Get(), Rect(row.left + 8, row.top, row.right - 50, row.bottom),
              sel ? Theme::Text : Theme::SubText);
         y += 50;
+        if (i == SP_GALLERY)            // خط فاصل: المعرض مش إعداد
+        {
+            Fill(Rect(navL + 10, y + 2, R - 10, y + 3), Theme::Border);
+            y += 10;
+        }
     }
     // خط فاصل
     Fill(Rect(navL - 14, top, navL - 13, bottom), Theme::Border);
@@ -110,6 +121,8 @@ void SettingsPanel::OnClick(int id)
             m_hotkeys->OnKeyDown(VK_ESCAPE);       // كان عم يستنى اختصار: منلغي
         m_page   = id - ID_NAV_FIRST;
         m_scroll = 0;
+        if (Panel* e = Embedded())
+            e->OnShow();
         return;
     }
     if (id >= SETTINGS_ID_OFFSET)
@@ -119,7 +132,10 @@ void SettingsPanel::OnClick(int id)
         return;
     }
     if (Panel* e = Embedded())
+    {
         e->OnClick(id);
+        AdoptClose(*e);             // مثلاً المعرض فتح نافذة القص
+    }
 }
 
 bool SettingsPanel::OnKeyDown(WPARAM vk)

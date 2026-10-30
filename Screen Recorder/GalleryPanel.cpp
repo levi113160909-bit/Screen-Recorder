@@ -3,6 +3,7 @@
 // =============================================================
 #include "GalleryPanel.h"
 #include "VideoTools.h"
+#include "Tooltip.h"
 #include <shellapi.h>
 #include <algorithm>
 
@@ -13,7 +14,9 @@ namespace
         ID_FILTER   = ID_PANEL_USER,          // +0..4
         ID_OPEN     = ID_PANEL_USER + 10,
         ID_REFRESH  = ID_PANEL_USER + 11,
-        ID_CARD     = ID_PANEL_USER + 100     // البطاقة i: + i*8 + (0 تشغيل ، 1 قص ، 2 تسمية ، 3 بالمجلد ، 4 حذف)
+        // البطاقة i: + i*8 + (0 تشغيل ، 1 قص ، 2 تسمية ، 3 بالمجلد ، 4 حذف)
+        // بعيدة عن أرقام قائمة الإعدادات (المعرض بينعرض جوّاها كمان)
+        ID_CARD     = ID_PANEL_USER + 2000
     };
     constexpr int MAX_ITEMS = 300;
 
@@ -130,10 +133,24 @@ void GalleryPanel::Refresh()
 void GalleryPanel::DrawBody(float L, float top, float R)
 {
     float y = top;
+    const bool narrow = (R - L) < 780;          // جوّا الإعدادات المكان أضيق
     // ---- الفلتر + أزرار ----
-    DrawSegmented(Rect(R - 520, y, R, y + 34), { L"الكل", L"التسجيلات", L"الإعادات", L"البث", L"الصور" }, m_filter, ID_FILTER, true);
-    DrawButton(Rect(L, y, L + 130, y + 34), L"فتح المجلد", ID_OPEN, false, true, Icon::Folder);
-    DrawButton(Rect(L + 138, y, L + 230, y + 34), L"تحديث", ID_REFRESH, false, true, Icon::Refresh);
+    const std::vector<std::wstring> filters = { L"الكل", L"التسجيلات", L"الإعادات", L"البث", L"الصور" };
+    if (narrow)
+    {
+        DrawSegmented(Rect(L, y, R, y + 34), filters, m_filter, ID_FILTER, true);
+        y += 44;
+        DrawButton(Rect(R - 130, y, R, y + 34), L"فتح المجلد", ID_OPEN, false, true, Icon::Folder);
+        DrawButton(Rect(R - 230, y, R - 138, y + 34), L"تحديث", ID_REFRESH, false, true, Icon::Refresh);
+    }
+    else
+    {
+        DrawSegmented(Rect(R - 520, y, R, y + 34), filters, m_filter, ID_FILTER, true);
+        DrawButton(Rect(L, y, L + 130, y + 34), L"فتح المجلد", ID_OPEN, false, true, Icon::Folder);
+        DrawButton(Rect(L + 138, y, L + 230, y + 34), L"تحديث", ID_REFRESH, false, true, Icon::Refresh);
+    }
+    Tip(ID_OPEN, L"فتح مجلد التسجيلات في مستكشف الملفات");
+    Tip(ID_REFRESH, L"إعادة قراءة الملفات من القرص");
     y += 48;
 
     std::vector<int> shown;
@@ -151,37 +168,41 @@ void GalleryPanel::DrawBody(float L, float top, float R)
         return;
     }
 
-    const float gap = 14, cols = 3;
+    const float gap = 14;
+    const int   cols = narrow ? 2 : 3;
     const float cw = (R - L - gap * (cols - 1)) / cols, th = cw * 9 / 16, ch = th + 54;
     std::lock_guard<std::mutex> lock(*m_mutex);
     for (size_t n = 0; n < shown.size(); ++n)
     {
         const int i = shown[n];
         const Item& it = m_items[i];
-        const float right = R - (n % 3) * (cw + gap);             // من اليمين
-        const float cy = y + (n / 3) * (ch + gap);
+        const float right = R - (n % cols) * (cw + gap);             // من اليمين
+        const float cy = y + (n / cols) * (ch + gap);
         const D2D1_RECT_F card = Rect(right - cw, cy, right, cy + ch);
         const D2D1_RECT_F thumb = Rect(card.left, card.top, card.right, card.top + th);
         const int base = ID_CARD + i * 8;
-        // الأزرار الصغيرة لازم تنسجّل قبل البطاقة لحتى تاخد الكبسة
+        // البطاقة أول، وبعدها الأزرار الصغيرة: آخر شي بينسجّل هو اللي بياخد الكبسة (شوف HitAt)
+        const bool hover = AddHit(card, base);
+        Tip(base, it.kind == 3 ? L"فتح الصورة" : L"تشغيل الفيديو");
         const bool over = g_mouse.x >= card.left && g_mouse.x <= card.right && g_mouse.y >= card.top && g_mouse.y <= card.bottom;
-        struct Btn { int a; const wchar_t* glyph; };
+        struct Btn { int a; const wchar_t* glyph; const wchar_t* tip; };
         std::vector<std::pair<Btn, D2D1_RECT_F>> btns;
         bool btnHover[5] = {};
         if (over)
         {
-            const Btn all[] = { { 1, L"\uE8C6" }, { 2, L"\uE8AC" }, { 3, Icon::Folder }, { 4, Icon::Delete } };
+            const Btn all[] = { { 1, L"\uE8C6", L"قصّ المقطع" }, { 2, L"\uE8AC", L"إعادة التسمية" },
+                                { 3, Icon::Folder, L"إظهار في المجلد" }, { 4, Icon::Delete, L"حذف (إلى سلة المحذوفات)" } };
             float bx = thumb.left + 8;
             for (const Btn& b : all)
             {
                 if (b.a == 1 && it.kind == 3) continue;          // الصور ما بتنقص
                 const D2D1_RECT_F r = Rect(bx, thumb.top + 8, bx + 32, thumb.top + 40);
                 btnHover[b.a] = AddHit(r, base + b.a);
+                Tip(base + b.a, b.tip);
                 btns.push_back({ b, r });
                 bx += 38;
             }
         }
-        const bool hover = AddHit(card, base);
         Fill(card, hover ? Theme::Hover : Theme::Card, 10);
 
         // الصورة المصغّرة
@@ -244,7 +265,7 @@ void GalleryPanel::DrawBody(float L, float top, float R)
             Text(video ? Icon::Play : L"", g_fIcon.Get(), Rect(pcx - 22, pcy - 22, pcx + 22, pcy + 22), Theme::White);
         }
     }
-    const size_t rows = (shown.size() + 2) / 3;
+    const size_t rows = (shown.size() + cols - 1) / cols;
     m_height = (y - top) + rows * (ch + gap) + 4;
 }
 
@@ -261,8 +282,14 @@ void GalleryPanel::OnClick(int id)
     const Item it = m_items[i];
     switch (a)
     {
-    case 0:     // تشغيل بالبرنامج الافتراضي
-        ShellExecuteW(nullptr, L"open", it.path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    case 0:     // تشغيل / عرض جوّا البرنامج
+        if (m_h.play)
+        {
+            auto play = m_h.play;
+            const std::wstring p = it.path;
+            const bool image = it.kind == 3;
+            CloseThen([play, p, image] { play(p, image); });
+        }
         break;
     case 1:     // قص
         if (m_h.trim) { auto trim = m_h.trim; const std::wstring p = it.path; CloseThen([trim, p] { trim(p); }); }

@@ -7,14 +7,16 @@
 //  الأقسام:
 //   - التسجيل، البث، المؤشر والإشعارات، عام: بيرسمهم main.cpp
 //     (لأنهم مربوطين بإعدادات البرنامج مباشرة)
-//   - الإعادة والاختصارات: صفحتين جاهزين (ReplayPanel و HotkeysPanel)
+//   - الإعادة والاختصارات والمعرض: صفحات جاهزة (ReplayPanel و HotkeysPanel و GalleryPanel)
 // =============================================================
 #pragma once
 #include "Panel.h"
 
 enum SettingsPage : int
 {
-    SP_RECORDING = 0, SP_STREAM, SP_REPLAY, SP_HOTKEYS, SP_OVERLAY, SP_GENERAL, SP_COUNT
+    SP_RECORDING = 0, SP_STREAM, SP_REPLAY, SP_HOTKEYS, SP_OVERLAY, SP_GENERAL,
+    SP_GALLERY,          // بآخر الترقيم (لحتى ما تتغيّر أرقام القديم)، بس بينعرض أول وحدة بالقائمة
+    SP_COUNT
 };
 
 // أرقام عناصر main.cpp جوّا نافذة الإعدادات = الرقم الأصلي + هالرقم
@@ -32,7 +34,8 @@ struct SettingsHooks
 class SettingsPanel : public Panel
 {
 public:
-    SettingsPanel(SettingsHooks hooks, std::unique_ptr<Panel> replay, std::unique_ptr<Panel> hotkeys, int page);
+    SettingsPanel(SettingsHooks hooks, std::unique_ptr<Panel> replay, std::unique_ptr<Panel> hotkeys,
+                  std::unique_ptr<Panel> gallery, int page);
 
     std::wstring   Title() const override    { return L"الإعدادات"; }
     const wchar_t* IconGlyph() const override { return Icon::Settings; }
@@ -50,7 +53,7 @@ private:
     Panel* Embedded() const;           // الصفحة الجاهزة الحالية (أو فاضي)
 
     SettingsHooks          m_hooks;
-    std::unique_ptr<Panel> m_replay, m_hotkeys;
+    std::unique_ptr<Panel> m_replay, m_hotkeys, m_gallery;
     int                    m_page = SP_RECORDING;
     float                  m_scroll = 0, m_scrollMax = 0;
     D2D1_RECT_F            m_content{};
