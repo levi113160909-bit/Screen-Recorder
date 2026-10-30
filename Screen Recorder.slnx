@@ -4,4 +4,5 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="Screen Recorder/Screen Recorder.vcxproj" Id="0daaf9ee-2def-4c93-bf62-08eed44e796b" />
+  <Project Path="VirtualCamera/VirtualCamera.vcxproj" Id="7c1d5e2a-4b9f-4a3e-9d61-2f8b0c7e5a14" />
 </Solution>

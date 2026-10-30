@@ -27,10 +27,12 @@ namespace
 UINT32 ReplayKbps(const ReplaySettings& s, int w, int h)
 {
     // الأساس: 1080p بـ 60 إطار ، وبيتغيّر حسب عدد البكسلات والإطارات
-    const double base[] = { 8000, 14000, 22000 };
+    // "فائقة": اللقطات قصيرة فما في داعي نوفّر، وكل ما قصرت المدة منعلّي أكتر
+    const double ultra[] = { 34000, 34000, 26000, 20000 };
+    const double base[] = { 8000, 14000, 22000, ultra[std::clamp(s.seconds, 0, 3)] };
     const double fps = s.fps == 0 ? 30 : 60;
-    const double k = base[std::clamp(s.quality, 0, 2)] * ((double)w * h * fps) / (1920.0 * 1080.0 * 60.0);
-    return (UINT32)std::clamp(k, 2500.0, 50000.0);
+    const double k = base[std::clamp(s.quality, 0, 3)] * ((double)w * h * fps) / (1920.0 * 1080.0 * 60.0);
+    return (UINT32)std::clamp(k, 2500.0, 80000.0);
 }
 
 ReplayPanel::ReplayPanel(ReplaySettings& settings, ReplayPanelHooks hooks)
@@ -100,7 +102,7 @@ void ReplayPanel::DrawBody(float L, float top, float R)
         Text(L"الإطارات", g_fSmall.Get(), Rect(r - half, y + 162, r, y + 180), Theme::SubText);
         Text(L"الجودة", g_fSmall.Get(), Rect(l, y + 162, l + half, y + 180), Theme::SubText);
         DrawSegmented(Rect(r - half, y + 182, r, y + 216), { L"30", L"60" }, m_s.fps, ID_FPS, true);
-        DrawSegmented(Rect(l, y + 182, l + half, y + 216), { L"منخفضة", L"متوسطة", L"عالية" }, m_s.quality, ID_QUALITY, true);
+        DrawSegmented(Rect(l, y + 182, l + half, y + 216), { L"منخفضة", L"متوسطة", L"عالية", L"فائقة" }, m_s.quality, ID_QUALITY, true);
 
         // تقدير الحجم بالذاكرة
         int sw = std::max(2, m_h.sourceW()), sh = std::max(2, m_h.sourceH());
@@ -147,7 +149,7 @@ void ReplayPanel::OnClick(int id)
     else if (id >= ID_DUR && id < ID_DUR + 4)          { m_s.seconds = id - ID_DUR; }
     else if (id >= ID_RES && id < ID_RES + 3)           m_s.res     = id - ID_RES;
     else if (id >= ID_FPS && id < ID_FPS + 2)           m_s.fps     = id - ID_FPS;
-    else if (id >= ID_QUALITY && id < ID_QUALITY + 3)   m_s.quality = id - ID_QUALITY;
+    else if (id >= ID_QUALITY && id < ID_QUALITY + 4)   m_s.quality = id - ID_QUALITY;
     else if (id == ID_SYSTEM)                           m_s.system  = !m_s.system;
     else if (id == ID_MIC)                              { if (!m_h.micEnabled()) return; m_s.mic = !m_s.mic; }
     else if (id == ID_AUTO)                             { m_s.autoStart = !m_s.autoStart; restart = false; }

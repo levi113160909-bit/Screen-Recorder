@@ -22,6 +22,8 @@ struct AddSourceActions
     std::function<void()>                     image;
     std::function<void()>                     text;
     std::function<void()>                     appAudio;
+    std::function<void()>                     region;     // جزء من الشاشة
+    std::function<void()>                     web;        // صفحة ويب (تنبيهات، شات...)
 };
 
 class AddSourcePanel : public Panel

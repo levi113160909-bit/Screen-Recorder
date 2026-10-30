@@ -241,7 +241,7 @@ namespace Theme
     const wchar_t* AccentName(int i)   { return ACCENT_NAMES[(i % ACCENT_COUNT + ACCENT_COUNT) % ACCENT_COUNT]; }
     D2D1_COLOR_F   AccentPreview(int i){ return D2D1::ColorF(ACCENTS[(i % ACCENT_COUNT + ACCENT_COUNT) % ACCENT_COUNT]); }
 
-    void Apply(int theme, int accent)
+    void Apply(int theme, int accent, UINT32 custom)
     {
         const Palette& p = PALETTES[(theme % THEME_COUNT + THEME_COUNT) % THEME_COUNT];
         Background = D2D1::ColorF(p.bg);
@@ -252,6 +252,6 @@ namespace Theme
         Text       = D2D1::ColorF(p.text);
         SubText    = D2D1::ColorF(p.sub);
         Off        = D2D1::ColorF(p.off);
-        Accent     = AccentPreview(accent);
+        Accent     = accent == ACCENT_COUNT ? D2D1::ColorF(custom) : AccentPreview(accent);
     }
 }

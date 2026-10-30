@@ -96,6 +96,7 @@ void PanelHost::Open(std::unique_ptr<Panel> panel)
 {
     m_panel   = std::move(panel);
     m_pressed = 0;
+    m_dragId  = 0;
     m_scroll  = 0;
 }
 
@@ -105,6 +106,7 @@ void PanelHost::Close()
         m_panel->OnCommit();
     m_panel.reset();
     m_pressed = 0;
+    m_dragId  = 0;
 }
 
 void PanelHost::Draw(float W, float H)
@@ -194,18 +196,29 @@ void PanelHost::OnMouseDown(D2D1_POINT_2F p)
         m_panel->m_activeSlider = m_pressed;
         ApplySlider(p);
     }
+    else if (m_pressed >= ID_PANEL_USER && m_panel->OnDrag(m_pressed, p))
+        m_dragId = m_pressed;
 }
 
 void PanelHost::OnMouseMove(D2D1_POINT_2F p)
 {
     if (m_panel && m_panel->m_activeSlider)
         ApplySlider(p);
+    else if (m_panel && m_dragId)
+        m_panel->OnDrag(m_dragId, p);
 }
 
 void PanelHost::OnMouseUp(D2D1_POINT_2F p)
 {
     if (!m_panel)
         return;
+    if (m_dragId)                    // خلص السحب الحر
+    {
+        m_dragId = 0;
+        m_pressed = 0;
+        m_panel->OnCommit();
+        return;
+    }
     if (m_panel->m_activeSlider)     // خلص السحب: منحفظ
     {
         m_panel->m_activeSlider = 0;

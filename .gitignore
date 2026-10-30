@@ -22,3 +22,4 @@ Release/
 
 # نسخ الإصدار الجاهزة (بتنرفع على GitHub Releases، مش مع الكود)
 dist/
+_addproj.py

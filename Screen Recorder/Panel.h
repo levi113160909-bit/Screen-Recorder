@@ -44,6 +44,8 @@ public:
     virtual bool           OnKeyDown(WPARAM /*vk*/) { return false; }  // كبسة زر (true = عالجتها)
     virtual bool           CapturingKeys() const { return false; }     // بدها كل الأزرار (حتى Alt و F10)
     virtual bool           OnWheel(D2D1_POINT_2F /*p*/, float /*steps*/) { return false; }   // تمرير خاص (true = عالجته)
+    // سحب حر بالماوس (مثلاً دائرة الألوان): true = هالعنصر بيتسحب. بينادى عند الكبس وكل حركة
+    virtual bool           OnDrag(int /*id*/, D2D1_POINT_2F /*p*/) { return false; }
 
 protected:
     // ---- عناصر جاهزة لكل النوافذ ----
@@ -97,7 +99,7 @@ public:
     void Open(std::unique_ptr<Panel> panel);
     void Close();
     bool IsOpen() const { return m_panel != nullptr; }
-    bool IsDragging() const { return m_panel && m_panel->m_activeSlider != 0; }
+    bool IsDragging() const { return m_panel && (m_panel->m_activeSlider != 0 || m_dragId != 0); }
 
     // بيترسم بعد كل الواجهة (فوقها)
     void Draw(float W, float H);
@@ -118,6 +120,7 @@ private:
 
     std::unique_ptr<Panel> m_panel;
     int         m_pressed = 0;                  // شو كان تحت الماوس لما انكبس
+    int         m_dragId = 0;                   // سحب حر (OnDrag)
     float       m_scroll = 0, m_scrollMax = 0;
     D2D1_RECT_F m_body{};
 };

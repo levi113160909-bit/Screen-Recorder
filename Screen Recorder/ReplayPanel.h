@@ -17,7 +17,7 @@ struct ReplaySettings
     int  seconds = 1;      // 0: 15 ، 1: 30 ، 2: 60 ، 3: 120
     int  res     = 1;      // 0 الأصلية ، 1 1080p ، 2 720p
     int  fps     = 1;      // 0: 30 ، 1: 60
-    int  quality = 1;      // 0 منخفضة ، 1 متوسطة ، 2 عالية
+    int  quality = 1;      // 0 منخفضة ، 1 متوسطة ، 2 عالية ، 3 فائقة (حسب المدة)
     bool system  = true;   // صوت النظام (كل أصوات الكمبيوتر)
     bool mic     = true;   // الميكروفون (إذا مفعّل بالمصادر)
     bool autoStart = false;   // تشغيل تلقائي لما ينفتح البرنامج

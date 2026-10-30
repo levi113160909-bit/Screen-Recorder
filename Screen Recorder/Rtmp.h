@@ -74,6 +74,8 @@ public:
     void Stop();
     void Push(const std::shared_ptr<const EncodedPacket>& pkt);
     OutputStatus Status();
+    // كم ثانية من القطع ناطرة تنبعت (إذا عم تكبر: النت أبطأ من البث)
+    double BufferedSeconds();
 
 private:
     void ThreadMain();

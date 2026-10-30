@@ -1,4 +1,4 @@
-// =============================================================
+﻿// =============================================================
 //  Ui.h - أدوات الواجهة المشتركة
 //
 //  هون كل شي بيحتاجه أي جزء من الواجهة:
@@ -48,7 +48,8 @@ namespace Theme
     const wchar_t* ThemeName(int i);
     const wchar_t* AccentName(int i);
     D2D1_COLOR_F   AccentPreview(int i);
-    void           Apply(int theme, int accent);
+    // accent == ACCENT_COUNT = لون مخصّص (custom = 0xRRGGBB)
+    void           Apply(int theme, int accent, UINT32 custom = 0x4F8CFF);
 }
 
 // أيقونات من خط "Segoe MDL2 Assets" (موجود بكل ويندوز 10 و 11)
@@ -79,6 +80,7 @@ namespace Icon
     inline const wchar_t Undo[]    = { 0xE7A7, 0 };   // رجوع للافتراضي
     inline const wchar_t Keyboard[] = { 0xE765, 0 };  // لوحة المفاتيح
     inline const wchar_t Settings[] = { 0xE713, 0 };  // ترس الإعدادات
+    inline const wchar_t Globe[]    = { 0xE774, 0 };  // صفحة ويب
 }
 
 // =============================================================

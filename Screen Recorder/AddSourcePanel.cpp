@@ -13,7 +13,7 @@ namespace
     {
         ID_SEARCH_CLEAR = ID_PANEL_USER,
         ID_SEARCH_BOX,
-        ID_IMAGE, ID_TEXT, ID_APP_AUDIO,
+        ID_IMAGE, ID_TEXT, ID_APP_AUDIO, ID_REGION, ID_WEB,
         ID_MONITOR_FIRST = ID_PANEL_USER + 100,
         ID_CAMERA_FIRST  = ID_PANEL_USER + 200,
         ID_WINDOW_FIRST  = ID_PANEL_USER + 300
@@ -184,31 +184,34 @@ float AddSourcePanel::Layout(float L, float y, float R, bool draw)
     // ---- إضافة سريعة (بتختفي وقت البحث) ----
     if (m_search.empty())
     {
-        Section(L"إضافة سريعة", 3);
+        Section(L"إضافة سريعة", 5);
         struct Tile { int id; const wchar_t* glyph; const wchar_t* title; const wchar_t* sub; };
         const Tile tiles[] = {
-            { ID_IMAGE,     Icon::Photo,   L"صورة",       L"من ملف على الجهاز" },
-            { ID_TEXT,      Icon::Font,    L"نص",         L"عنوان أو رسالة" },
-            { ID_APP_AUDIO, Icon::Speaker, L"صوت برنامج", L"صوت تطبيق واحد فقط" },
+            { ID_REGION,    Icon::Monitor, L"جزء من الشاشة", L"حدّد المنطقة بالسحب" },
+            { ID_WEB,       L"\uE774",    L"صفحة ويب",      L"تنبيهات، دونيشن، شات" },
+            { ID_IMAGE,     Icon::Photo,   L"صورة",          L"من ملف على الجهاز" },
+            { ID_TEXT,      Icon::Font,    L"نص",            L"عنوان أو رسالة" },
+            { ID_APP_AUDIO, Icon::Speaker, L"صوت برنامج",    L"صوت تطبيق واحد فقط" },
         };
         const float tw = (R - L - GAP * 2) / 3;
-        for (int k = 0; k < 3; ++k)
+        for (int k = 0; k < 5; ++k)
         {
-            const float right = R - k * (tw + GAP);        // الأول على اليمين
-            const D2D1_RECT_F tile = Rect(right - tw, y, right, y + TILE_H);
+            const float right = R - (k % 3) * (tw + GAP);  // الأول على اليمين ، 3 بكل سطر
+            const float ty = y + (k / 3) * (TILE_H + GAP);
+            const D2D1_RECT_F tile = Rect(right - tw, ty, right, ty + TILE_H);
             if (!draw)
                 continue;
             const bool hover = AddHit(tile, tiles[k].id);
             Fill(tile, hover ? Theme::Hover : Theme::Card, 12);
             if (hover)
                 Stroke(tile, WithAlpha(Theme::Accent, 0.6f), 12);
-            const D2D1_RECT_F ib = Rect(tile.right - 50, y + 20, tile.right - 14, y + 56);
+            const D2D1_RECT_F ib = Rect(tile.right - 50, ty + 20, tile.right - 14, ty + 56);
             Fill(ib, WithAlpha(Theme::Accent, hover ? 0.28f : 0.16f), 10);
             Text(tiles[k].glyph, g_fIconBig.Get(), ib, Theme::Accent);
-            Text(tiles[k].title, g_fBody.Get(), Rect(tile.left + 8, y + 18, tile.right - 60, y + 40), Theme::Text);
-            Text(tiles[k].sub, g_fSmall.Get(), Rect(tile.left + 8, y + 40, tile.right - 60, y + 58), Theme::SubText);
+            Text(tiles[k].title, g_fBody.Get(), Rect(tile.left + 8, ty + 18, tile.right - 60, ty + 40), Theme::Text);
+            Text(tiles[k].sub, g_fSmall.Get(), Rect(tile.left + 8, ty + 40, tile.right - 60, ty + 58), Theme::SubText);
         }
-        y += TILE_H + 6;
+        y += TILE_H * 2 + GAP + 6;
     }
 
     // ---- الشاشات: بطاقات فيها لقطة، اتنين بكل سطر ----
@@ -314,6 +317,8 @@ void AddSourcePanel::OnClick(int id)
     if (id == ID_IMAGE)        { CloseThen(a.image); return; }
     if (id == ID_TEXT)         { CloseThen(a.text); return; }
     if (id == ID_APP_AUDIO)    { CloseThen(a.appAudio); return; }
+    if (id == ID_REGION)       { if (a.region) CloseThen(a.region); return; }
+    if (id == ID_WEB)          { if (a.web) CloseThen(a.web); return; }
     if (id >= ID_WINDOW_FIRST && id - ID_WINDOW_FIRST < (int)m_windows.size())
     {
         const CaptureTarget t = m_windows[id - ID_WINDOW_FIRST];

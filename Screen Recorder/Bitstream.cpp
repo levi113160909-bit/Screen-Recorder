@@ -201,6 +201,58 @@ namespace bs
         out.insert(out.end(), data, data + n);
     }
 
+    void LengthPrefixedToAnnexB(const uint8_t* p, size_t n, std::vector<uint8_t>& out)
+    {
+        out.clear();
+        out.reserve(n + 16);
+        size_t i = 0;
+        while (i + 4 <= n)
+        {
+            const size_t len = (size_t(p[i]) << 24) | (size_t(p[i + 1]) << 16) | (size_t(p[i + 2]) << 8) | p[i + 3];
+            i += 4;
+            if (len == 0 || i + len > n)
+                break;
+            out.push_back(0); out.push_back(0); out.push_back(0); out.push_back(1);
+            out.insert(out.end(), p + i, p + i + len);
+            i += len;
+        }
+    }
+
+    std::vector<uint8_t> ConfigToAnnexB(const std::vector<uint8_t>& c, bool hevc)
+    {
+        std::vector<uint8_t> out;
+        auto put = [&](size_t at, size_t len)
+        {
+            if (at + len > c.size()) return false;
+            out.push_back(0); out.push_back(0); out.push_back(0); out.push_back(1);
+            out.insert(out.end(), c.begin() + at, c.begin() + at + len);
+            return true;
+        };
+        auto u16 = [&](size_t at) { return at + 2 <= c.size() ? (size_t(c[at]) << 8) | c[at + 1] : 0; };
+        if (!hevc)
+        {
+            if (c.size() < 7) return {};
+            size_t i = 5;
+            const int sps = c[i++] & 0x1F;
+            for (int k = 0; k < sps; ++k) { const size_t l = u16(i); i += 2; if (!put(i, l)) return {}; i += l; }
+            if (i >= c.size()) return out;
+            const int pps = c[i++];
+            for (int k = 0; k < pps; ++k) { const size_t l = u16(i); i += 2; if (!put(i, l)) return {}; i += l; }
+            return out;
+        }
+        if (c.size() < 23) return {};
+        size_t i = 22;
+        const int arrays = c[i++];
+        for (int a = 0; a < arrays; ++a)
+        {
+            if (i + 3 > c.size()) return {};
+            ++i;                                   // النوع
+            const size_t count = u16(i); i += 2;
+            for (size_t k = 0; k < count; ++k) { const size_t l = u16(i); i += 2; if (!put(i, l)) return {}; i += l; }
+        }
+        return out;
+    }
+
     double FlvVideoCodecId(bool hevc)
     {
         return hevc ? (double)(('h' << 24) | ('v' << 16) | ('c' << 8) | '1') : 7.0;

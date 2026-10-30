@@ -19,6 +19,8 @@
 
 // الاختصار اللي انمسك بنافذة الاختصارات (من المراقب): wParam = الزر ، lParam = Ctrl/Alt/Shift/Win
 constexpr UINT WM_HOTKEY_CAPTURE = WM_APP + 40;
+// اضغط لتتكلم: wParam = 1 انضغط ، 0 انترك
+constexpr UINT WM_PUSH_TO_TALK = WM_APP + 41;
 
 enum HotkeyAction : int
 {
@@ -30,6 +32,9 @@ enum HotkeyAction : int
     HK_MIC_MUTE,        // كتم المايك
     HK_NEXT_SCENE,      // المشهد التالي
     HK_OVERLAY,         // إظهار/إخفاء مؤشر التسجيل
+    HK_SCREENSHOT,      // لقطة شاشة (صورة PNG)
+    HK_MARKER,          // علامة بنص التسجيل
+    HK_PUSH_TO_TALK,    // اضغط لتتكلم (مطوّلاً): المايك بيشتغل بس وانت ضاغط
     HK_COUNT
 };
 

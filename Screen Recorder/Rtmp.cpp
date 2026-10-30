@@ -325,6 +325,15 @@ OutputStatus RtmpOutput::Status()
 }
 
 // القطع بتوصل من المشفّر (نفس القطعة بتروح لكل المنصات)
+double RtmpOutput::BufferedSeconds()
+{
+    std::lock_guard<std::mutex> lock(m_qMutex);
+    if (m_queue.size() < 2)
+        return 0;
+    const uint32_t a = m_queue.front()->timeMs, b = m_queue.back()->timeMs;
+    return b > a ? (b - a) / 1000.0 : 0;
+}
+
 void RtmpOutput::Push(const std::shared_ptr<const EncodedPacket>& pkt)
 {
     if (!m_live)

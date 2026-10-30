@@ -206,6 +206,18 @@ bool Streamer::Start(const StreamOptions& options, std::wstring& error)
         m_outputTrack.push_back(track);
     }
 
+    // نسخة على الجهاز: من النسخة الأفقية الأعلى جودة (بيفتح الملف أول ما يجي إطار كامل)
+    m_file.reset();
+    m_fileTried = false;
+    m_fileTrack = -1;
+    m_adaptivePercent = 100;
+    if (!m_opt.saveCopyPath.empty() && live)
+        for (size_t t = 0; t < m_tracks.size(); ++t)
+            if (!m_tracks[t]->vertical && (m_fileTrack < 0 || m_tracks[t]->kbps > m_tracks[m_fileTrack]->kbps))
+                m_fileTrack = (int)t;
+    for (auto& tr : m_tracks)
+        tr->curKbps = tr->kbps;
+
     // الصوت
     m_taps.clear();
     for (AudioSource* src : m_opt.audio)
@@ -251,6 +263,23 @@ void Streamer::Stop()
     if (!outputs->empty())
         std::thread([outputs] { outputs->clear(); }).detach();
 
+    // نسخة البث: منسكّرها بالخلفية (كتابة الفهرس بالآخر بتاخد لحظة) ومنخبّر الواجهة
+    if (m_file)
+    {
+        std::shared_ptr<StreamFileWriter> file(std::move(m_file));
+        const HWND notify = m_opt.notify;
+        std::thread([file, notify]
+        {
+            const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            const std::wstring path = file->Path();
+            const bool ok = SUCCEEDED(file->Close());
+            if (SUCCEEDED(hrCo)) CoUninitialize();
+            auto* p = ok ? new std::wstring(path) : nullptr;
+            if (!PostMessageW(notify, WM_STREAM_COPY_SAVED, 0, (LPARAM)p))
+                delete p;
+        }).detach();
+    }
+
     // تسكير المشفّرات والتصوير بالخلفية: لحتى الواجهة ما تعلق أبداً لو التعريف تأخّر
     auto tracks = std::make_shared<std::vector<std::unique_ptr<Track>>>(std::move(m_tracks));
     m_tracks.clear();
@@ -287,12 +316,77 @@ std::vector<OutputStatus> Streamer::Status()
     return out;
 }
 
+// =============================================================
+//  البت ريت الذكي: إذا القطع عم تتجمّع عند المُرسِل (النت أبطأ من البث)
+//  منخفّض المعدّل بخطوات، ولما يرجع النت منيح منرجّعه شوي شوي.
+//  أحسن من إنو المنصة تقطّع أو نرمي إطارات.
+// =============================================================
+void Streamer::Adapt(int t)
+{
+    Track& tr = *m_tracks[t];
+    static thread_local LONGLONG lastCheck = 0;
+    const LONGLONG now = Elapsed100ns();
+    if (now - lastCheck < ONE_SECOND)
+        return;                                    // مرة بالثانية
+    lastCheck = now;
+
+    double backlog = 0;                            // كم ثانية عم تستنى عند أبطأ منصة
+    for (size_t i = 0; i < m_outputs.size(); ++i)
+        if (m_outputTrack[i] == t)
+            backlog = std::max(backlog, m_outputs[i]->BufferedSeconds());
+
+    UINT32 next = tr.curKbps;
+    if (backlog > 0.8)                             // النت ضعف: نزول 25%
+    {
+        next = std::max<UINT32>(tr.kbps * 3 / 10, tr.curKbps * 3 / 4);
+        tr.calmChecks = 0;
+    }
+    else if (backlog < 0.2 && tr.curKbps < tr.kbps)
+    {
+        if (++tr.calmChecks >= 8)                  // 8 ثواني هدوء: طلوع 10%
+        {
+            next = std::min<UINT32>(tr.kbps, tr.curKbps + std::max<UINT32>(250, tr.kbps / 10));
+            tr.calmChecks = 0;
+        }
+    }
+    else
+        tr.calmChecks = 0;
+
+    if (next != tr.curKbps && tr.nv->SetBitrate(next))
+        tr.curKbps = next;
+
+    int pct = 100;
+    for (const auto& x : m_tracks)
+        if (x->kbps) pct = std::min(pct, (int)(x->curKbps * 100 / x->kbps));
+    m_adaptivePercent = pct;
+}
+
 // نفس القطعة لكل المنصات (بدون نسخ: shared_ptr)
 void Streamer::Broadcast(std::vector<EncodedPacket>& packets)
 {
     std::lock_guard<std::mutex> lock(m_broadcastMutex);
     for (EncodedPacket& p : packets)
     {
+        // نسخة البث على الجهاز (نفس القطع بالضبط)
+        if (m_fileTrack >= 0 && (!p.video || p.track == m_fileTrack))
+        {
+            if (!m_file && !m_fileTried && p.video && p.keyframe)
+            {
+                m_fileTried = true;
+                std::vector<uint8_t> cfg;
+                {
+                    std::lock_guard<std::mutex> lk(m_shared->mutex);
+                    cfg = m_shared->avcConfig[m_fileTrack];
+                }
+                const Track& tr = *m_tracks[m_fileTrack];
+                auto file = std::make_unique<StreamFileWriter>();
+                if (file->Open(m_opt.saveCopyPath, tr.hevc, tr.width, tr.height, m_opt.fps, tr.kbps, cfg,
+                               tr.bframes > 0, m_opt.audioKbps))
+                    m_file = std::move(file);
+            }
+            if (m_file)
+                m_file->Write(p);
+        }
         auto shared = std::make_shared<const EncodedPacket>(std::move(p));
         for (size_t i = 0; i < m_outputs.size(); ++i)
             if (!shared->video || shared->track == m_outputTrack[i])
@@ -378,6 +472,8 @@ void Streamer::VideoThread(int t)
                 const int slot = track.pipe->Convert(tex);
                 if (slot >= 0)
                 {
+                    if (m_opt.adaptive && !m_opt.isReplay)
+                        Adapt(t);
                     std::vector<NvPacket> nvp;
                     const bool ok = track.nv->Encode(track.pipe->SlotTexture(slot), now100, m_frameDuration, nvp, key);
                     track.pipe->Release(slot);

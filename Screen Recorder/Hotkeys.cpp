@@ -23,6 +23,9 @@ namespace
     std::atomic<HWND>                         g_target{ nullptr };
     std::atomic<bool>                         g_hookStarted{ false };
     bool                                      g_down[256] = {};  // (بخيط المراقب بس)
+    std::atomic<UINT>                         g_pttVk{ 0 };       // زر "اضغط لتتكلم" (0 = ما في)
+    std::atomic<UINT>                         g_pttMods{ 0 };
+    bool                                      g_pttHeld = false;
 
     UINT ModsNow()
     {
@@ -57,11 +60,26 @@ namespace
             if (target) PostMessageW(target, WM_HOTKEY_CAPTURE, vk, mods);
             return true;
         }
+        // اضغط لتتكلم: الإضافات (Ctrl...) لازم تكون مضغوطة بالبداية بس
+        if (vk == g_pttVk && (mods & g_pttMods) == g_pttMods && !g_pttHeld)
+        {
+            g_pttHeld = true;
+            if (target) PostMessageW(target, WM_PUSH_TO_TALK, 1, 0);
+        }
         std::lock_guard<std::mutex> lock(g_hookMutex);
         for (const auto& [slot, b] : g_hookBindings)
-            if (b.vk == vk && b.mods == mods && target)
+            if (b.vk == vk && b.mods == mods && target && slot != HK_PUSH_TO_TALK)
                 PostMessageW(target, WM_HOTKEY, (WPARAM)(slot + 1), 0);
         return false;                         // الاختصار العادي ما منبلعه (بيوصل للعبة كمان)
+    }
+
+    void OnRelease(UINT vk)
+    {
+        if (g_pttHeld && vk == g_pttVk)
+        {
+            g_pttHeld = false;
+            if (const HWND target = g_target) PostMessageW(target, WM_PUSH_TO_TALK, 0, 0);
+        }
     }
 
     LRESULT CALLBACK KeyboardProc(int code, WPARAM wp, LPARAM lp)
@@ -84,6 +102,7 @@ namespace
             else
             {
                 g_down[vk] = false;
+                OnRelease(vk);
                 if (capturing)
                     return 1;
             }
@@ -101,6 +120,8 @@ namespace
             if (wp == WM_XBUTTONDOWN) vk = HIWORD(m->mouseData) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2;
             if (vk && OnPress(vk))
                 return 1;
+            if (wp == WM_MBUTTONUP) OnRelease(VK_MBUTTON);
+            if (wp == WM_XBUTTONUP) OnRelease(HIWORD(m->mouseData) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2);
         }
         return CallNextHookEx(nullptr, code, wp, lp);
     }
@@ -158,6 +179,9 @@ const wchar_t* HotkeyManager::ActionName(int action)
     case HK_MIC_MUTE:      return L"كتم الميكروفون";
     case HK_NEXT_SCENE:    return L"المشهد التالي";
     case HK_OVERLAY:       return L"إظهار مؤشر التسجيل / إخفاؤه";
+    case HK_SCREENSHOT:    return L"لقطة شاشة (صورة)";
+    case HK_MARKER:        return L"وضع علامة أثناء التسجيل";
+    case HK_PUSH_TO_TALK:  return L"اضغط لتتكلم (استمر بالضغط)";
     }
     return L"";
 }
@@ -170,6 +194,8 @@ HotkeyBinding HotkeyManager::Default(int action)
     case HK_PAUSE:       return { 0, VK_F10 };
     case HK_STREAM:      return { 0, VK_F8 };
     case HK_REPLAY_SAVE: return { 0, VK_F7 };
+    case HK_SCREENSHOT:  return { MOD_CONTROL, VK_F7 };
+    case HK_MARKER:      return { MOD_CONTROL, VK_F9 };
     }
     return {};         // الباقي بلا اختصار بالأول
 }
@@ -265,8 +291,10 @@ void HotkeyManager::Apply(HWND hwnd)
     {
         if (m_suspended || !m_keys[i].vk)
             continue;
-        // أزرار الفأرة، أو اللي ويندوز رفضه (برنامج تاني ماخده أو محجوز): عن طريق المراقب
-        if (IsMouse(m_keys[i].vk) || !RegisterHotKey(hwnd, i + 1, m_keys[i].mods | MOD_NOREPEAT, m_keys[i].vk))
+        // أزرار الفأرة، أو اللي ويندوز رفضه (برنامج تاني ماخده أو محجوز)، و"اضغط لتتكلم"
+        // (بدها نعرف وقت تترك الزر كمان): عن طريق المراقب
+        if (i == HK_PUSH_TO_TALK || IsMouse(m_keys[i].vk) ||
+            !RegisterHotKey(hwnd, i + 1, m_keys[i].mods | MOD_NOREPEAT, m_keys[i].vk))
             m_viaHook[i] = true;
     }
     UpdateHook();
@@ -278,11 +306,16 @@ void HotkeyManager::UpdateHook()
     for (int i = 0; i < (int)m_keys.size(); ++i)
         if (i < (int)m_viaHook.size() && m_viaHook[i] && !m_suspended)
             list.push_back({ i, m_keys[i] });
+    const bool ptt = !m_suspended && HK_PUSH_TO_TALK < (int)m_keys.size() && m_keys[HK_PUSH_TO_TALK].vk;
+    g_pttMods = ptt ? m_keys[HK_PUSH_TO_TALK].mods : 0;
+    g_pttVk   = ptt ? m_keys[HK_PUSH_TO_TALK].vk : 0;
+    bool any;
     {
         std::lock_guard<std::mutex> lock(g_hookMutex);
         g_hookBindings = std::move(list);
+        any = !g_hookBindings.empty();
     }
-    if (!g_hookBindings.empty())
+    if (any || ptt)
         EnsureHookThread();
 }
 

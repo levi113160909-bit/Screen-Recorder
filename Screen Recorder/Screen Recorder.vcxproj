@@ -150,6 +150,20 @@
 
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="VirtualCam.cpp" />
+    <ClCompile Include="BrowserSource.cpp" />
+    <ClCompile Include="FirstRunPanel.cpp" />
+    <ClCompile Include="GameDetect.cpp" />
+    <ClCompile Include="TrimPanel.cpp" />
+    <ClCompile Include="GalleryPanel.cpp" />
+    <ClCompile Include="VideoTools.cpp" />
+    <ClCompile Include="StreamFile.cpp" />
+    <ClCompile Include="ChromaPanel.cpp" />
+    <ClCompile Include="Chroma.cpp" />
+    <ClCompile Include="RegionSelect.cpp" />
+    <ClCompile Include="Updater.cpp" />
+    <ClCompile Include="Screenshot.cpp" />
+    <ClCompile Include="ColorPickerPanel.cpp" />
     <ClCompile Include="Recorder.cpp" />
     <ClCompile Include="Capture.cpp" />
     <ClCompile Include="Audio.cpp" />
@@ -194,6 +208,20 @@
     <ClInclude Include="AudioFilters.h" />
     <ClInclude Include="Replay.h" />
     <ClInclude Include="Ui.h" />
+    <ClInclude Include="VirtualCam.h" />
+    <ClInclude Include="BrowserSource.h" />
+    <ClInclude Include="FirstRunPanel.h" />
+    <ClInclude Include="GameDetect.h" />
+    <ClInclude Include="TrimPanel.h" />
+    <ClInclude Include="GalleryPanel.h" />
+    <ClInclude Include="VideoTools.h" />
+    <ClInclude Include="StreamFile.h" />
+    <ClInclude Include="ChromaPanel.h" />
+    <ClInclude Include="Chroma.h" />
+    <ClInclude Include="RegionSelect.h" />
+    <ClInclude Include="Updater.h" />
+    <ClInclude Include="Screenshot.h" />
+    <ClInclude Include="ColorPickerPanel.h" />
     <ClInclude Include="Panel.h" />
     <ClInclude Include="MicFiltersPanel.h" />
     <ClInclude Include="AppAudio.h" />

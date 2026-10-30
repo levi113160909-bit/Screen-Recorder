@@ -23,6 +23,7 @@
 #include <wrl/client.h>
 #include <deque>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -61,8 +62,15 @@ public:
     // آخر التسجيل: بيطلّع كل اللي ناطر جوّا المشفّر
     bool Flush(std::vector<NvPacket>& packets);
 
+    // تغيير معدّل البت وهو شغّال (البث: لما يضعف النت). kbps بالكيلوبت
+    bool SetBitrate(UINT kbps);
+    UINT Bitrate() const { return m_kbps; }
+
 private:
     bool Drain(bool keepDelay, std::vector<NvPacket>& packets);
+    std::shared_ptr<void> m_params;     // إعدادات التشغيل (لحتى نعدّل عليها لاحقاً)
+    UINT                  m_kbps = 0;
+    bool                  m_cbr = false;
 
     struct Buffer
     {

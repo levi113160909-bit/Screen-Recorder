@@ -38,6 +38,11 @@ namespace bs
     // إطار: ctsMs = الفرق بين وقت العرض ووقت فك الضغط (مع B-frames)
     void FlvVideoFrame(bool hevc, bool key, int32_t ctsMs, const uint8_t* data, size_t n, std::vector<uint8_t>& out);
 
+    // العكس: من وحدات بطولها لـ Annex B (لكتابة ملف MP4 من قطع البث)
+    void LengthPrefixedToAnnexB(const uint8_t* p, size_t n, std::vector<uint8_t>& out);
+    // من بطاقة التعريف (avcC / hvcC) لـ SPS/PPS (و VPS) بصيغة Annex B
+    std::vector<uint8_t> ConfigToAnnexB(const std::vector<uint8_t>& config, bool hevc);
+
     // رقم الترميز بمعلومات البث (onMetaData): H.264 = 7 ، HEVC = 'hvc1'
     double FlvVideoCodecId(bool hevc);
 }

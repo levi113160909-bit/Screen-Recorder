@@ -23,10 +23,13 @@
 #include "Replay.h"
 #include "GpuEncode.h"
 #include "NvEnc.h"
+#include "StreamFile.h"
 
 // رسالة للواجهة إذا البث وقف لحالو (مشكلة بالمشفّر)
 // lParam = 1 إذا كان محرّك الإعادة
 constexpr UINT WM_STREAMER_DONE = WM_APP + 2;
+// خلصت نسخة البث على الجهاز: lParam = new std::wstring(المسار) أو nullptr إذا فشلت
+constexpr UINT WM_STREAM_COPY_SAVED = WM_APP + 44;
 
 // طريقة النسخة العمودية
 enum class VerticalMode
@@ -50,6 +53,8 @@ struct StreamOptions
     EncoderMode               encoder = EncoderMode::Auto;
     std::shared_ptr<ReplayBuffer> replay;   // إذا موجود: منحفظ آخر ثواني فيه
     bool                      isReplay = false;
+    std::wstring              saveCopyPath;        // فاضي = ما منحفظ نسخة من البث
+    bool                      adaptive = true;     // خفّض معدّل البت لحاله إذا ضعف النت
 };
 
 class Streamer
@@ -74,6 +79,9 @@ public:
     int EncodeCount() const { return (int)m_tracks.size(); }
     // تنبيه للمستخدم (مثلاً HEVC ما زبط فرجعنا لـ H.264) - فاضي = تمام
     std::wstring Warning() const { return m_warning; }
+    // البت ريت الذكي: نسبة المعدّل الحالي من المطلوب (100 = كامل ، أقل = خفّضناه بسبب النت)
+    int AdaptivePercent() const { return m_adaptivePercent; }
+    bool SavingCopy() const { return m_file != nullptr; }
 
     // حالة كل وجهة (بنفس ترتيب options.targets)
     std::vector<OutputStatus> Status();
@@ -113,6 +121,8 @@ private:
         std::unique_ptr<GpuFramePipe> pipe;
         std::unique_ptr<NvencEncoder> nv;
         std::vector<uint8_t>          nvConfig;     // SPS/PPS من NVENC
+        UINT32                        curKbps = 0;  // البت ريت الذكي: المعدّل الحالي
+        int                           calmChecks = 0;
         std::thread thread;
         void Reset() { encoder.Shutdown(); nv.reset(); pipe.reset(); comp.reset(); nvConfig.clear(); active = false; }
     };
@@ -124,6 +134,11 @@ private:
     std::vector<int> m_taps;
 
     std::vector<std::unique_ptr<Track>> m_tracks;
+    std::unique_ptr<StreamFileWriter>   m_file;          // نسخة البث على الجهاز
+    int                                 m_fileTrack = -1;
+    bool                                m_fileTried = false;
+    std::atomic<int>                    m_adaptivePercent{ 100 };
+    void Adapt(int t);
     std::wstring m_warning;
     AacEncoder   m_audio;
     std::mutex   m_broadcastMutex;          // الخيطين بيبعتوا لنفس المُرسِلات

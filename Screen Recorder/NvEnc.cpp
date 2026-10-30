@@ -29,6 +29,11 @@ namespace
 
 #define API (static_cast<NV_ENCODE_API_FUNCTION_LIST*>(m_api))
 
+namespace
+{
+    struct Params { NV_ENC_INITIALIZE_PARAMS init{}; NV_ENC_CONFIG cfg{}; };
+}
+
 NvencEncoder::NvencEncoder() = default;
 NvencEncoder::~NvencEncoder() { Close(); }
 
@@ -230,6 +235,15 @@ bool NvencEncoder::Open(ID3D11Device* device, bool hevc, UINT width, UINT height
         Close();
         return false;
     }
+    {
+        auto p = std::make_shared<Params>();
+        p->cfg  = cfg;
+        p->init = ip;
+        p->init.encodeConfig = &p->cfg;
+        m_params = p;
+        m_kbps = bitrate / 1000;
+        m_cbr  = cbr;
+    }
 
     // ---- الخانات: صورة دخل + مكان للناتج لكل إطار ممكن يكون "جوّا" المشفّر ----
     const int count = rc.lookaheadDepth + m_bframes + 1 + 3;
@@ -325,6 +339,7 @@ void NvencEncoder::Close()
         FreeLibrary(m_dll);
     m_dll = nullptr;
     m_seqHeader.clear();
+    m_params.reset();
     m_inputPts.clear();
     m_durations.clear();
     m_sent = m_got = m_inputBase = 0;
@@ -370,6 +385,29 @@ bool NvencEncoder::Encode(ID3D11Texture2D* nv12, LONGLONG pts, LONGLONG duration
     m_durations[pts] = duration;
     ++m_sent;
     return Drain(true, packets);
+}
+
+bool NvencEncoder::SetBitrate(UINT kbps)
+{
+    if (!m_encoder || !m_params || kbps == 0 || kbps == m_kbps)
+        return false;
+    auto* p = static_cast<Params*>(m_params.get());
+    const uint32_t bps = kbps * 1000;
+    NV_ENC_RC_PARAMS& rc = p->cfg.rcParams;
+    rc.averageBitRate  = bps;
+    rc.maxBitRate      = m_cbr ? bps : bps * 2;
+    rc.vbvBufferSize   = m_cbr ? bps : bps * 2;
+    rc.vbvInitialDelay = rc.vbvBufferSize;
+    NV_ENC_RECONFIGURE_PARAMS re{};
+    re.version            = NV_ENC_RECONFIGURE_PARAMS_VER;
+    re.reInitEncodeParams = p->init;
+    re.reInitEncodeParams.encodeConfig = &p->cfg;
+    re.resetEncoder       = 0;           // بلا ما نقطع: التغيير بيصير بنعومة
+    re.forceIDR           = 0;
+    if (API->nvEncReconfigureEncoder(m_encoder, &re) != NV_ENC_SUCCESS)
+        return false;
+    m_kbps = kbps;
+    return true;
 }
 
 bool NvencEncoder::Flush(std::vector<NvPacket>& packets)

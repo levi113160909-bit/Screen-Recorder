@@ -1,7 +1,9 @@
-// =============================================================
+﻿// =============================================================
 //  Media.cpp - الكاميرا (Media Foundation) والصور (WIC) والنص (DirectWrite)
 // =============================================================
 #include "Media.h"
+#include "BrowserSource.h"
+#include "Chroma.h"
 
 #include <mfapi.h>
 #include <mfidl.h>
@@ -516,15 +518,22 @@ std::shared_ptr<const MediaFrame> GetLayerFrame(const SceneLayer& layer, bool* m
         *missing = false;
     switch (layer.kind)
     {
-    case LayerKind::Camera: return CameraFrame(layer.source, missing);
+    case LayerKind::Camera: return ApplyChroma(layer, CameraFrame(layer.source, missing));
     case LayerKind::Image:  return ImageFrame(layer.source, missing);
     case LayerKind::Text:   return TextFrame(layer);
+    case LayerKind::Web:    return BrowserFrame(layer.source, layer.srcW, layer.srcH, missing);
     default:                return nullptr;
     }
 }
 
 bool MediaNaturalSize(const SceneLayer& layer, int& width, int& height)
 {
+    if (layer.kind == LayerKind::Web)          // حجم الصفحة اللي اخترناه (حتى قبل ما تحمّل)
+    {
+        width  = layer.srcW > 0 ? layer.srcW : 1920;
+        height = layer.srcH > 0 ? layer.srcH : 1080;
+        return true;
+    }
     std::shared_ptr<const MediaFrame> f = GetLayerFrame(layer);
     if (layer.kind == LayerKind::Camera && !f)
     {
