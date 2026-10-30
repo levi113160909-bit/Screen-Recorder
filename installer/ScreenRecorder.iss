@@ -9,7 +9,7 @@
 ;      %LOCALAPPDATA%\Programs\Screen Recorder
 ;    (وبيقدر يختار "لكل المستخدمين" إذا بدو)
 ;  - إذا البرنامج مفتوح ، المثبّت بيطلب يتسكّر (AppMutex)
-;  - إزالة التثبيت: بتشيل التشغيل مع ويندوز ، والكاميرا الافتراضية (بموافقة المسؤول)،
+;  - إزالة التثبيت: بتشيل التشغيل مع ويندوز (والمهمة المجدولة بوضع المسؤول) ، والكاميرا الافتراضية (بموافقة المسؤول)،
 ;    وبتسأل إذا بدك تحذف الإعدادات. التسجيلات ما بتنلمس أبداً.
 ;  - AppId ثابت لازم ما يتغيّر أبداً (هو اللي بيخلّي الإصدار الجديد يتثبّت فوق القديم)
 ; =============================================================
@@ -115,10 +115,29 @@ begin
   ShellExec('runas', ExpandConstant('{cmd}'), Params, '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
+// "التشغيل مع ويندوز" بوضع المسؤول: مهمة بجدولة المهام (Elevation.cpp ، نفس الاسم)
+// إنشاؤها كان بصلاحية المسؤول ، فحذفها كمان (طلب موافقة واحد)
+procedure RemoveStartupTask();
+var
+  Code: Integer;
+begin
+  if not Exec(ExpandConstant('{sys}\schtasks.exe'), '/Query /TN "ScreenRecorder"', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Exit;
+  if Code <> 0 then
+    Exit;                                   // ما في مهمة
+  if UninstallSilent then
+    Exit;
+  ShellExec('runas', ExpandConstant('{sys}\schtasks.exe'), '/Delete /TN "ScreenRecorder" /F', '', SW_HIDE,
+            ewWaitUntilTerminated, Code);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
+  begin
+    RemoveStartupTask();
     RemoveVirtualCamera();
+  end;
   if (CurUninstallStep = usPostUninstall) and (not UninstallSilent) then
     if MsgBox('هل تريد حذف الإعدادات والمشاهد وتقارير الأعطال أيضًا؟' + #13#10 +
               '(التسجيلات نفسها لن تُحذف)', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then

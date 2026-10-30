@@ -150,6 +150,7 @@
 
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Elevation.cpp" />
     <ClCompile Include="CrashLog.cpp" />
     <ClCompile Include="UiStreamTab.cpp" />
     <ClCompile Include="UiSourcesTab.cpp" />
@@ -233,6 +234,7 @@
     <ClInclude Include="AudioFilters.h" />
     <ClInclude Include="Replay.h" />
     <ClInclude Include="Ui.h" />
+    <ClInclude Include="Elevation.h" />
     <ClInclude Include="Version.h" />
     <ClInclude Include="CrashLog.h" />
     <ClInclude Include="AppIds.h" />

@@ -179,6 +179,9 @@ TrayIcon     g_tray;
 bool         g_closeToTray   = true;   // ✕ = يضل شغّال جنب الساعة
 
 bool         g_toastsOn      = true;   // الإشعارات بزاوية الشاشة
+bool         g_runAsAdmin    = false;  // التشغيل كمسؤول (للألعاب اللي شغّالة كمسؤول)
+bool         g_elevationDeclined = false;
+bool         g_startupTask   = false;
 
 bool         g_overlayOverApp = true;  // المؤشر والإشعارات بيبيّنوا حتى لما نافذة البرنامج قدامك
 

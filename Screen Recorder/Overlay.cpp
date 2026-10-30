@@ -3,10 +3,12 @@
 // =============================================================
 #include "Overlay.h"
 #include <shellscalingapi.h>
+#include <shellapi.h>
 #include <algorithm>
 #include <cmath>
 
 #pragma comment(lib, "shcore.lib")
+#pragma comment(lib, "shell32.lib")
 
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
@@ -20,7 +22,24 @@ namespace
     constexpr float TOAST_W  = 320, TOAST_H = 68;
     constexpr float GAP      = 10;      // بين الشارة والإشعار
     constexpr ULONGLONG TOAST_MS = 3200;   // قديش بيضل الإشعار
+    constexpr ULONGLONG TOAST_MIN_MS = 1600;   // إذا في إشعار ناطر: الحالي بيضل هالقد بس
     constexpr ULONGLONG FADE_MS  = 350;
+    constexpr size_t    QUEUE_MAX = 4;         // أكتر من هيك: منشيل الأقدم (ما بنكوّم إشعارات قديمة)
+
+    // الشاشة اللي إنت عم تشتغل عليها: شاشة النافذة اللي قدامك
+    // (إلا إذا سطح المكتب أو شريط المهام قدامك: وقتها الشاشة اللي عم تتسجّل)
+    HMONITOR UserMonitor(HMONITOR fallback)
+    {
+        if (HWND fg = GetForegroundWindow(); fg && IsWindowVisible(fg) && !IsIconic(fg))
+        {
+            wchar_t cls[64] = {};
+            GetClassNameW(fg, cls, 64);
+            if (wcscmp(cls, L"Progman") != 0 && wcscmp(cls, L"WorkerW") != 0 &&
+                wcscmp(cls, L"Shell_TrayWnd") != 0 && wcscmp(cls, L"Shell_SecondaryTrayWnd") != 0)
+                return MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        }
+        return fallback ? fallback : MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    }
 
     LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
@@ -81,16 +100,64 @@ void RecordingOverlay::Destroy()
 
 void RecordingOverlay::Toast(wchar_t glyph, D2D1_COLOR_F color, const std::wstring& title, const std::wstring& sub, bool force)
 {
-    m_toast.force = force;
-    m_toast.glyph = glyph;
-    m_toast.color = color;
-    m_toast.title = title;
-    m_toast.sub   = sub;
+    ToastInfo t;
+    t.force = force;
+    t.glyph = glyph;
+    t.color = color;
+    t.title = title;
+    t.sub   = sub;
+    // نفس نوع الإشعار مبيّن هلق (متل "علامة 3" بعد "علامة 2" ، أو "الميكروفون يعمل" بعد "مكتوم"):
+    // منحدّثه بمكانه بدل ما نصفّه. النوع = أول كلمة من العنوان
+    auto firstWord = [](const std::wstring& s) { return s.substr(0, s.find(L' ')); };
+    if (m_toast.start && m_queue.empty() && firstWord(m_toast.title) == firstWord(title))
+    {
+        t.start = GetTickCount64() - std::min<ULONGLONG>(GetTickCount64() - m_toast.start, FADE_MS);
+        m_toast = t;
+        return;
+    }
+    m_queue.push_back(t);
+    while (m_queue.size() > QUEUE_MAX)
+        m_queue.pop_front();
+    if (!m_toast.start)
+        NextToast();
+}
+
+void RecordingOverlay::NextToast()
+{
+    if (m_queue.empty())
+    {
+        m_toast.start = 0;
+        return;
+    }
+    m_toast = m_queue.front();
+    m_queue.pop_front();
     m_toast.start = GetTickCount64();
+}
+
+void RecordingOverlay::CheckExclusive()
+{
+    if (m_exCheck++ % 15 == 0)                // كل نص ثانية بتكفّي
+    {
+        QUERY_USER_NOTIFICATION_STATE st{};
+        const bool ex = SUCCEEDED(SHQueryUserNotificationState(&st)) && st == QUNS_RUNNING_D3D_FULL_SCREEN;
+        if (m_exclusive && !ex && m_missed && !m_tipShown)
+        {
+            // طلعت من اللعبة: منقلّك ليش ما شفت الإشعارات (مرة وحدة)
+            m_tipShown = true;
+            m_missed = false;
+            Toast(0xE7BA, Theme::Yellow, L"لم تظهر الإشعارات فوق اللعبة",
+                  L"اللعبة بوضع «ملء الشاشة الحصري»: اختر «بلا حواف» من إعداداتها");
+        }
+        m_exclusive = ex;
+    }
+    if (m_exclusive && m_toast.start)
+        m_missed = true;
 }
 
 void RecordingOverlay::Update(const OverlayState& s, int corner, HWND owner)
 {
+    CheckExclusive();
+
     // نافذة البرنامج قدامك فعلاً؟ (المصغّرة بتضل "قدام" عند ويندوز لحد ما تكبس على شي تاني،
     // فمنتأكد إنها مش مصغّرة وإنها مبيّنة)
     const bool ownerInFront = owner && GetForegroundWindow() == owner && !IsIconic(owner) && IsWindowVisible(owner);
@@ -107,13 +174,16 @@ void RecordingOverlay::Update(const OverlayState& s, int corner, HWND owner)
     float toastAlpha = 0, toastSlide = 0;
     if (m_toast.start)
     {
+        // في إشعار ناطر؟ الحالي بيقصر (بس بيضل وقت كافي ينقرا)
+        const ULONGLONG life = m_queue.empty() ? TOAST_MS : TOAST_MIN_MS;
         const ULONGLONG t = GetTickCount64() - m_toast.start;
-        if (t >= TOAST_MS)
-            m_toast.start = 0;
-        else
+        if (t >= life)
+            NextToast();
+        if (m_toast.start && GetTickCount64() - m_toast.start < life)
         {
-            const float in  = std::min(1.0f, t / (float)FADE_MS);
-            const float out = std::min(1.0f, (TOAST_MS - t) / (float)FADE_MS);
+            const ULONGLONG tt = GetTickCount64() - m_toast.start;
+            const float in  = std::min(1.0f, tt / (float)FADE_MS);
+            const float out = std::min(1.0f, (life - tt) / (float)FADE_MS);
             toastAlpha = std::min(in, out);
             toastSlide = (1 - in) * (1 - in);           // بيدخل من الطرف بنعومة
         }
@@ -291,8 +361,8 @@ void RecordingOverlay::DrawToast(float x0, float y0, float alpha)
 // -------------------------------------------------------------
 void RecordingOverlay::Render(const OverlayState& s, int corner, bool showPill, float toastAlpha, float toastSlide)
 {
-    // على أي شاشة؟ اللي عم تتسجّل (main.cpp بيحددها من المشهد)، وإلا الرئيسية
-    HMONITOR mon = s.monitor ? s.monitor : MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    // على أي شاشة؟ اللي إنت عم تشتغل عليها (وإلا اللي عم تتسجّل ، وإلا الرئيسية)
+    HMONITOR mon = UserMonitor(s.monitor);
     MONITORINFO mi{ sizeof(mi) };
     GetMonitorInfoW(mon, &mi);
     UINT dpiX = 96, dpiY = 96;
@@ -390,8 +460,10 @@ void RecordingOverlay::Render(const OverlayState& s, int corner, bool showPill, 
         ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
         m_shown = true;
     }
-    // الألعاب وسطح المكتب بيحاولوا يطلعوا فوق كلشي: كل ثانية، وكل ما تبدّلت النافذة، منرجع نحطها فوق
-    if (m_frame % 30 == 0 || m_frame < 3 || m_fgChanged)
-        SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    // الألعاب والبرامج التانية (مثلاً اللي عليها "دائمًا في المقدمة") بتحاول تطلع فوق كلشي:
+    // منرجّعها لفوق كل ربع ثانية ، وكل إطار وقت الإشعار ، وفورًا كل ما تبدّلت النافذة اللي قدامك
+    if (m_frame % 8 == 0 || m_frame < 3 || m_fgChanged || toastAlpha > 0)
+        SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
     m_fgChanged = false;
 }

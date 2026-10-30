@@ -63,6 +63,7 @@
 #include "BrowserSource.h"
 #include "VirtualCam.h"
 #include "CrashLog.h"
+#include "Elevation.h"
 #include <shobjidl.h>
 #include <commdlg.h>
 #include <wincrypt.h>
@@ -243,6 +244,9 @@ extern RecordingOverlay g_overlay;
 extern TrayIcon g_tray;
 extern bool g_closeToTray;   // ✕ = يضل شغّال جنب الساعة
 extern bool g_toastsOn;   // الإشعارات بزاوية الشاشة
+extern bool g_runAsAdmin;          // الإعداد: التشغيل كمسؤول (Elevation.h)
+extern bool g_elevationDeclined;   // الإعداد مفعّل بس رفضت الموافقة بهالتشغيلة
+extern bool g_startupTask;         // التشغيل مع ويندوز عن طريق جدولة المهام (وضع المسؤول)
 extern bool g_overlayOverApp;   // المؤشر والإشعارات بيبيّنوا حتى لما نافذة البرنامج قدامك
 extern int g_settingsPage;   // آخر قسم فتحته بنافذة الإعدادات
 extern bool g_trayHintShown;   // نبّهناه مرة إنه لسا شغّال؟
@@ -306,6 +310,7 @@ void SaveSettings();
 void LoadSettings();
 bool IsRunAtStartup();
 void SetRunAtStartup(bool on);
+void SyncStartupMode();
 
 // ---- ReplayControl.cpp: الإعادة: التسجيل المستمر بالذاكرة، الحفظ، وكشف الألعاب ----
 std::wstring ReplayFolder();

@@ -183,7 +183,9 @@ float DrawSettingsPage(int page, float L, float top, float R)
             DrawSegmented(Rect(l + 140, y, r, y + 34), { L"تظهر", L"لا تظهر" }, g_toastsOn ? 0 : 1, O + ID_TOASTS_FIRST, true);
             DrawButton(Rect(l, y, l + 130, y + 34), L"تجربة", O + ID_TEST_TOAST, false, g_toastsOn);
             y += 40;
-            Hint(L"بدء التسجيل وحفظه، الإعادة، البث، المايك... في زاوية المؤشر");
+            Hint(L"بدء التسجيل وحفظه، حفظ الإعادة، لقطة الشاشة، البث، المايك... في زاوية المؤشر");
+            Hint(L"تظهر فوق كل النوافذ والألعاب، على الشاشة التي تعمل عليها");
+            Hint(L"الألعاب بوضع «ملء الشاشة الحصري» لا تسمح بظهور أي شيء فوقها: اختر «بلا حواف» (Borderless) في إعدادات اللعبة", Theme::Off);
         });
         Option(L"عندما تكون نافذة البرنامج أمامك", [&]
         {
@@ -314,6 +316,19 @@ float DrawSettingsPage(int page, float L, float top, float R)
             DrawSegmented(Rect(l, y, r, y + 34), { L"لا", L"نعم، بجانب الساعة" }, IsRunAtStartup() ? 1 : 0, O + ID_STARTUP_FIRST, true);
             y += 40;
             Hint(L"يبدأ مخفيًّا بجانب الساعة، جاهزًا للاختصارات والإعادة");
+        });
+        Option(L"الصلاحية", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"عادية", L"كمسؤول" }, g_runAsAdmin ? 1 : 0, O + ID_ADMIN_FIRST, !Busy());
+            y += 40;
+            Hint(L"فعّل «كمسؤول» إذا لم تعمل الاختصارات داخل لعبة (كثير من ألعاب مضاد الغش تعمل كمسؤول)");
+            Hint(L"يطلب ويندوز موافقتك عند فتح البرنامج، أما التشغيل مع ويندوز فيبقى بلا طلب");
+            if (IsElevated())
+                Hint(L"البرنامج يعمل الآن كمسؤول", Theme::Green);
+            else if (g_runAsAdmin)
+                Hint(L"البرنامج يعمل الآن بصلاحية عادية لأن طلب الموافقة رُفض", Theme::Yellow);
+            else
+                Hint(L"البرنامج يعمل الآن بصلاحية عادية", Theme::Off);
         });
         Option(L"الانتقال بين المشاهد", [&]
         {

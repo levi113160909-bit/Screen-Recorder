@@ -1,4 +1,4 @@
-// =============================================================
+﻿// =============================================================
 //  main.cpp - نقطة البداية: إنشاء النافذة، ومعالجة رسائل ويندوز (الماوس، الكيبورد، المؤقّت...)
 // =============================================================
 #include "App.h"
@@ -45,6 +45,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SyncSceneHotkeys();         // اختصارات المشاهد
         g_hotkeys.Apply(hwnd);
         LoadTargets();
+        SyncStartupMode();          // التشغيل مع ويندوز: مفتاح Run أو جدولة المهام (حسب وضع المسؤول)
+        if (g_elevationDeclined)
+            Notify(Glyph::Warning, Theme::Yellow, L"يعمل البرنامج بصلاحية عادية",
+                   L"لم تتم الموافقة على صلاحية المسؤول، فقد لا تعمل الاختصارات داخل بعض الألعاب");
         {
             // البرنامج وقع بالتشغيل الماضي؟ منقلّك وين التقرير
             std::wstring report;
@@ -133,6 +137,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                                                     : L"● بث مباشر  " + FormatTime(g_streamer.ElapsedMs())) + L"\nمسجّل الشاشة");
         if (g_tick % 60 == 0)           // كل ثانيتين: النوافذ والبرامج اللي رجعت انفتحت
         {
+            // لعبة شغّالة كمسؤول قدامك والبرنامج عادي؟ منقلّك (مرة وحدة) إنو الاختصارات ممكن ما تشتغل جوّاها
+            static bool elevatedTipShown = false;
+            if (!elevatedTipShown && !IsElevated() && g_gameHwnd && GetForegroundWindow() == g_gameHwnd &&
+                WindowIsMoreElevated(g_gameHwnd))
+            {
+                elevatedTipShown = true;
+                Notify(Glyph::Game, Theme::Yellow, L"اللعبة تعمل كمسؤول",
+                       L"إذا لم تعمل الاختصارات: الإعدادات ← عام ← الصلاحية ← كمسؤول");
+            }
             ReconnectLostWindows();
             g_appMixer.Reconnect();
             FollowWindowAspect();
@@ -539,6 +552,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_HOTKEY:
     {
         const int slot = HotkeyManager::SlotFromId(wParam);
+        {
+            // نفس الإجراء ممكن يوصل من طريقين (ويندوز + مراقب الألعاب اللي شغّالة كمسؤول): منتجاهل التكرار
+            static std::vector<ULONGLONG> last;
+            if (slot < 0)
+                return 0;
+            if ((int)last.size() <= slot)
+                last.resize(slot + 1, 0);
+            const ULONGLONG now = GetTickCount64();
+            if (now - last[slot] < 300)
+                return 0;
+            last[slot] = now;
+        }
         if (slot >= HK_COUNT)                     // اختصار مشهد
         {
             SwitchScene(slot - HK_COUNT);
@@ -665,11 +690,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR cmdLine, int nCmdShow)
 {
     InstallCrashHandler(APP_VERSION);      // أول شي: أي عطل بعد هون بينكتب تقرير (CrashLog.h)
     const wchar_t CLASS_NAME[] = L"ScreenRecorderWindow";
+    // نسخة "كمسؤول" فتحتها النسخة العادية (Elevation.h): بتستنى العادية تسكّر بدل ما تطلع
+    const bool elevatedRestart = cmdLine && wcsstr(cmdLine, L"--elevated-restart") != nullptr;
 
     // نسخة وحدة بس: إذا البرنامج شغّال (حتى لو مخبّى جنب الساعة) منبيّنه ومنطلع
     // (منفحص أول شي، قبل ما نفتح الصوت والكاميرا)
     HANDLE single = CreateMutexW(nullptr, TRUE, L"ScreenRecorder_SingleInstance");
-    if (single && GetLastError() == ERROR_ALREADY_EXISTS)
+    if (single && GetLastError() == ERROR_ALREADY_EXISTS && elevatedRestart &&
+        WaitForSingleObject(single, 20000) != WAIT_TIMEOUT)
+    {
+        // النسخة القديمة سكّرت ، وصرنا نحنا النسخة الوحيدة
+    }
+    else if (single && GetLastError() == ERROR_ALREADY_EXISTS)
     {
         if (HWND other = FindWindowW(CLASS_NAME, nullptr))
         {
@@ -703,6 +735,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR cmdLine, int nCmdShow)
     }
 
     LoadSettings();
+
+    // وضع المسؤول (الإعدادات ← عام ← الصلاحية): منعيد فتح البرنامج كمسؤول قبل ما نفتح الصوت والنافذة
+    if (g_runAsAdmin && !IsElevated() && !elevatedRestart)
+    {
+        if (RelaunchElevated(startHidden ? L"--elevated-restart --tray" : L"--elevated-restart"))
+        {
+            ReleaseMutex(single);
+            CloseHandle(single);
+            MFShutdown();
+            CoUninitialize();
+            return 0;
+        }
+        g_elevationDeclined = true;          // رفضت الموافقة: منكمّل بصلاحية عادية
+    }
     g_encoders = Recorder::ListEncoders();
 
     if (g_systemOn) g_systemAudio.Start();
@@ -742,6 +788,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR cmdLine, int nCmdShow)
 
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    if (IsElevated())
+    {
+        // كمسؤول: ويندوز بيمنع البرامج العادية تبعتلنا رسائل. منسمح بهدول بس:
+        // أيقونة الساعة (من explorer) ، رجعة شريط المهام ، و"افتح البرنامج" من نسخة تانية
+        AllowMessageFromLowerPrivilege(hwnd, WM_TRAY);
+        AllowMessageFromLowerPrivilege(hwnd, WM_TASKBARCREATED);
+        AllowMessageFromLowerPrivilege(hwnd, WM_SHOWAPP);
+    }
     ShowWindow(hwnd, startHidden ? SW_HIDE : nCmdShow);
     if (cmdLine && wcsstr(cmdLine, L"--test-crash"))     // تجربة سجل الأعطال
         PostMessageW(hwnd, WM_TEST_CRASH, 0, 0);

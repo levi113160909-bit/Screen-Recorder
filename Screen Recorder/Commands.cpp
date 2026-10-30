@@ -59,6 +59,40 @@ void OnClick(int id, D2D1_POINT_2F p)
         if (!rec) { g_fpsChoice = modes[id - ID_FPS_MODE_FIRST]; SaveSettings(); RestartReplayIfActive(); }
         return;
     }
+    if (id >= ID_ADMIN_FIRST && id < ID_ADMIN_FIRST + 2)
+    {
+        const bool want = (id == ID_ADMIN_FIRST + 1);
+        if (want == g_runAsAdmin)
+            return;
+        if (Busy() || g_streamer.IsActive())
+        {
+            ShowMessage(L"أوقف التسجيل والبث أولًا", true);
+            return;
+        }
+        const bool startup = IsRunAtStartup();
+        g_runAsAdmin = want;
+        SaveSettings();
+        if (want && !IsElevated())
+        {
+            // منعيد فتح البرنامج كمسؤول (ويندوز بيسأل موافقة) ، والنسخة الجديدة بتكمّل من نفس المكان
+            if (RelaunchElevated(L"--elevated-restart"))
+            {
+                g_reallyQuit = true;
+                DestroyWindow(g_hwnd);       // بيحفظ كلشي ، والنسخة الجديدة ناطرة نسكّر
+                return;
+            }
+            g_runAsAdmin = false;            // رفضت الموافقة: منرجع متل ما كنا
+            SaveSettings();
+            ShowMessage(L"لم تتم الموافقة على صلاحية المسؤول", true);
+            return;
+        }
+        // تبديل طريقة التشغيل مع ويندوز للطريقة المناسبة
+        if (startup)
+            SetRunAtStartup(true);
+        if (!want && IsElevated())
+            ShowMessage(L"سيعمل البرنامج بصلاحية عادية من المرة القادمة التي تفتحه فيها", false);
+        return;
+    }
     if (id >= ID_STARTUP_FIRST && id < ID_STARTUP_FIRST + 2)
     {
         SetRunAtStartup(id == ID_STARTUP_FIRST + 1);

@@ -161,6 +161,7 @@ void SaveSettings()
     put(L"AccentCustom",   std::to_wstring(g_accentCustom));
     put(L"UpdateCheckDay", std::to_wstring(g_updateCheckDay));
     put(L"Toasts",         g_toastsOn ? L"1" : L"0");
+    put(L"RunAsAdmin",     g_runAsAdmin ? L"1" : L"0");
     put(L"OverlayOverApp", g_overlayOverApp ? L"1" : L"0");
     put(L"TrayHintShown",  g_trayHintShown ? L"1" : L"0");
     put(L"SystemAudio", g_systemOn ? L"1" : L"0");
@@ -251,6 +252,7 @@ void LoadSettings()
     g_updateCheckDay = getInt(L"UpdateCheckDay", 0);
     Theme::Apply(g_themeChoice, g_accentChoice, g_accentCustom);
     g_toastsOn       = getInt(L"Toasts", 1) != 0;
+    g_runAsAdmin     = getInt(L"RunAsAdmin", 0) != 0;
     g_overlayOverApp = getInt(L"OverlayOverApp", 1) != 0;
     g_trayHintShown  = getInt(L"TrayHintShown", 0) != 0;
     g_hotkeys.Load(g_settingsPath);
@@ -306,26 +308,103 @@ void LoadSettings()
     g_replayBuffer->SetSeconds(REPLAY_SECONDS[g_replaySet.seconds]);
 }
 
+// -------------------------------------------------------------
+//  التشغيل مع ويندوز: طريقتين
+//   - عادي: مفتاح Run بالريجستري (HKCU)
+//   - وضع المسؤول: مهمة بجدولة المهام بأعلى صلاحية (مفتاح Run ما بيشغّل برامج بدها مسؤول)
+//  وحدة بس منهن موجودة بنفس الوقت.
+// -------------------------------------------------------------
+namespace
+{
+    std::wstring ExePath()
+    {
+        wchar_t exe[MAX_PATH * 2] = {};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH * 2);
+        return exe;
+    }
+    bool RunKeyExists()
+    {
+        wchar_t buf[1024] = {};
+        DWORD size = sizeof(buf);
+        return RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_NAME, RRF_RT_REG_SZ, nullptr, buf, &size) == ERROR_SUCCESS;
+    }
+    void SetRunKey(bool on)
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS)
+            return;
+        if (on)
+        {
+            const std::wstring cmd = L"\"" + ExePath() + L"\" --tray";
+            RegSetValueExW(key, RUN_NAME, 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+        }
+        else
+            RegDeleteValueW(key, RUN_NAME);
+        RegCloseKey(key);
+    }
+    // حذف المهمة وإحنا مش مسؤول: منطلب موافقة مرة وحدة (schtasks)
+    bool DeleteStartupTaskWithPrompt()
+    {
+        SHELLEXECUTEINFOW sei{ sizeof(sei) };
+        sei.fMask        = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+        sei.hwnd         = g_hwnd;
+        sei.lpVerb       = L"runas";
+        sei.lpFile       = L"schtasks.exe";
+        sei.lpParameters = L"/Delete /TN \"ScreenRecorder\" /F";
+        sei.nShow        = SW_HIDE;
+        if (!ShellExecuteExW(&sei))
+            return false;
+        if (sei.hProcess)
+        {
+            WaitForSingleObject(sei.hProcess, 10000);
+            CloseHandle(sei.hProcess);
+        }
+        return !StartupTaskExists();
+    }
+}
+
 bool IsRunAtStartup()
 {
-    wchar_t buf[1024] = {};
-    DWORD size = sizeof(buf);
-    return RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_NAME, RRF_RT_REG_SZ, nullptr, buf, &size) == ERROR_SUCCESS;
+    return g_startupTask || RunKeyExists();
 }
 
 void SetRunAtStartup(bool on)
 {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS)
+    // منشيل الطريقتين أول ، ومنحط الطريقة المناسبة
+    SetRunKey(false);
+    if (g_startupTask)
+        g_startupTask = !(IsElevated() ? DeleteStartupTask() : DeleteStartupTaskWithPrompt());
+    if (!on)
         return;
-    if (on)
+    if (g_runAsAdmin && IsElevated() && CreateStartupTask(ExePath(), L"--tray"))
     {
-        wchar_t exe[MAX_PATH];
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        const std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --tray";
-        RegSetValueExW(key, RUN_NAME, 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+        g_startupTask = true;
+        return;
     }
-    else
-        RegDeleteValueW(key, RUN_NAME);
-    RegCloseKey(key);
+    SetRunKey(true);
+}
+
+// عند الفتح: منرتّب طريقة التشغيل مع ويندوز حسب وضع المسؤول
+void SyncStartupMode()
+{
+    g_startupTask = StartupTaskExists();
+    if (!IsElevated())
+        return;                          // ما منقدر ننشئ أو نحذف المهمة بلا صلاحية
+    const bool wanted = g_startupTask || RunKeyExists();
+    if (!wanted)
+        return;
+    if (g_runAsAdmin)
+    {
+        // كل مرة منحدّث المهمة (ممكن البرنامج انتقل لمكان جديد بعد تحديث)
+        if (CreateStartupTask(ExePath(), L"--tray"))
+        {
+            g_startupTask = true;
+            SetRunKey(false);
+        }
+    }
+    else if (g_startupTask && DeleteStartupTask())
+    {
+        g_startupTask = false;
+        SetRunKey(true);
+    }
 }

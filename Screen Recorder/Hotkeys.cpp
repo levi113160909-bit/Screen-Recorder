@@ -4,6 +4,7 @@
 #include "Hotkeys.h"
 #include <cwchar>
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <thread>
 
@@ -26,6 +27,9 @@ namespace
     std::atomic<UINT>                         g_pttVk{ 0 };       // زر "اضغط لتتكلم" (0 = ما في)
     std::atomic<UINT>                         g_pttMods{ 0 };
     bool                                      g_pttHeld = false;
+    // المراقب الثالث (للألعاب اللي شغّالة كمسؤول): كل الاختصارات، مش بس اللي عند المراقب
+    std::vector<std::pair<int, HotkeyBinding>> g_pollBindings;    // (محمي بـ g_hookMutex)
+    std::atomic<bool>                         g_pollStarted{ false };
 
     UINT ModsNow()
     {
@@ -126,6 +130,134 @@ namespace
         return CallNextHookEx(nullptr, code, wp, lp);
     }
 
+    // =============================================================
+    //  المراقب الثالث: للنوافذ اللي صلاحيتها أعلى منّا (لعبة شغّالة كمسؤول)
+    // =============================================================
+    // مستوى الصلاحية (Integrity) لعملية: عادي = 0x2000 ، مسؤول = 0x3000
+    DWORD IntegrityOf(HANDLE token)
+    {
+        DWORD len = 0;
+        GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &len);
+        if (!len)
+            return 0;
+        std::vector<BYTE> buf(len);
+        if (!GetTokenInformation(token, TokenIntegrityLevel, buf.data(), len, &len))
+            return 0;
+        const auto* label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buf.data());
+        const UCHAR count = *GetSidSubAuthorityCount(label->Label.Sid);
+        return count ? *GetSidSubAuthority(label->Label.Sid, count - 1) : 0;
+    }
+
+    DWORD OwnIntegrity()
+    {
+        static const DWORD level = []
+        {
+            HANDLE t = nullptr;
+            DWORD l = 0;
+            if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &t))
+            {
+                l = IntegrityOf(t);
+                CloseHandle(t);
+            }
+            return l;
+        }();
+        return level;
+    }
+
+    // النافذة اللي قدامك صلاحيتها أعلى منّا؟ (إذا ما قدرنا نعرف، متل ألعاب مضاد الغش المحمية: منعتبرها أعلى)
+    bool ForegroundIsHigher(HWND fg)
+    {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        if (!pid || pid == GetCurrentProcessId())
+            return false;
+        HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!p)
+            return true;
+        bool higher = true;
+        HANDLE t = nullptr;
+        if (OpenProcessToken(p, TOKEN_QUERY, &t))
+        {
+            higher = IntegrityOf(t) > OwnIntegrity();
+            CloseHandle(t);
+        }
+        CloseHandle(p);
+        return higher;
+    }
+
+    bool KeyDown(UINT vk) { return (GetAsyncKeyState((int)vk) & 0x8000) != 0; }
+
+    UINT ModsAsync()
+    {
+        UINT m = 0;
+        if (KeyDown(VK_CONTROL))                  m |= MOD_CONTROL;
+        if (KeyDown(VK_MENU))                     m |= MOD_ALT;
+        if (KeyDown(VK_SHIFT))                    m |= MOD_SHIFT;
+        if (KeyDown(VK_LWIN) || KeyDown(VK_RWIN)) m |= MOD_WIN;
+        return m;
+    }
+
+    void EnsurePollThread()
+    {
+        if (g_pollStarted.exchange(true))
+            return;
+        std::thread([]
+        {
+            bool was[256] = {};
+            HWND lastFg = nullptr;
+            bool higher = false, pttHeld = false;
+            for (;;)
+            {
+                Sleep(10);
+                const HWND fg = GetForegroundWindow();
+                if (fg != lastFg)                  // منفحص الصلاحية بس لما تتبدّل النافذة
+                {
+                    lastFg = fg;
+                    higher = fg && ForegroundIsHigher(fg);
+                }
+                std::vector<std::pair<int, HotkeyBinding>> list;
+                {
+                    std::lock_guard<std::mutex> lock(g_hookMutex);
+                    list = g_pollBindings;
+                }
+                const HWND target = g_target;
+                const bool active = higher && !g_capturing && target;
+                const UINT mods = active ? ModsAsync() : 0;
+                bool now[256] = {};
+                for (const auto& [slot, b] : list)
+                    now[b.vk & 0xFF] = KeyDown(b.vk);
+                if (active)
+                {
+                    for (const auto& [slot, b] : list)
+                    {
+                        const UINT vk = b.vk & 0xFF;
+                        if (slot == HK_PUSH_TO_TALK)
+                            continue;
+                        if (now[vk] && !was[vk] && b.mods == mods)       // انضغط هلق (مش مضغوط من قبل)
+                            PostMessageW(target, WM_HOTKEY, (WPARAM)(slot + 1), 0);
+                    }
+                    // اضغط لتتكلم
+                    const UINT pv = g_pttVk;
+                    if (pv)
+                    {
+                        const bool d = KeyDown(pv) && (mods & g_pttMods) == g_pttMods;
+                        if (d != pttHeld)
+                        {
+                            pttHeld = d;
+                            PostMessageW(target, WM_PUSH_TO_TALK, d ? 1 : 0, 0);
+                        }
+                    }
+                }
+                else if (pttHeld && target)                             // رجعنا لنافذة عادية والزر لسا "مضغوط" عنّا
+                {
+                    pttHeld = false;
+                    PostMessageW(target, WM_PUSH_TO_TALK, 0, 0);
+                }
+                std::memcpy(was, now, sizeof(was));
+            }
+        }).detach();
+    }
+
     void EnsureHookThread()
     {
         if (g_hookStarted.exchange(true))
@@ -140,6 +272,11 @@ namespace
             if (ms) UnhookWindowsHookEx(ms);
         }).detach();
     }
+}
+
+bool WindowIsMoreElevated(HWND hwnd)
+{
+    return hwnd && ForegroundIsHigher(hwnd);
 }
 
 HotkeyManager::HotkeyManager()
@@ -309,14 +446,23 @@ void HotkeyManager::UpdateHook()
     const bool ptt = !m_suspended && HK_PUSH_TO_TALK < (int)m_keys.size() && m_keys[HK_PUSH_TO_TALK].vk;
     g_pttMods = ptt ? m_keys[HK_PUSH_TO_TALK].mods : 0;
     g_pttVk   = ptt ? m_keys[HK_PUSH_TO_TALK].vk : 0;
+    // المراقب الثالث بياخد كل الاختصارات (بيشتغل بس وقت لعبة "كمسؤول" قدامك)
+    std::vector<std::pair<int, HotkeyBinding>> all;
+    if (!m_suspended)
+        for (int i = 0; i < (int)m_keys.size(); ++i)
+            if (m_keys[i].vk)
+                all.push_back({ i, m_keys[i] });
     bool any;
     {
         std::lock_guard<std::mutex> lock(g_hookMutex);
         g_hookBindings = std::move(list);
         any = !g_hookBindings.empty();
+        g_pollBindings = all;
     }
     if (any || ptt)
         EnsureHookThread();
+    if (!all.empty())
+        EnsurePollThread();
 }
 
 void HotkeyManager::BeginCapture(std::function<void(const HotkeyBinding&)> done)

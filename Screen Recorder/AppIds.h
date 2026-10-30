@@ -64,6 +64,7 @@ enum : int
     ID_SETUP_AGAIN        = 298,  // إعادة الإعداد السريع
     ID_VCAM_TOGGLE        = 299,  // تشغيل/إيقاف الكاميرا الافتراضية (تبويب البث)
     ID_OPEN_CRASHES       = 300,  // فتح مجلد تقارير الأعطال (الإعدادات ← عام ← حول)
+    ID_ADMIN_FIRST        = 302,  // 2: الصلاحية (عادية / كمسؤول) ، الإعدادات ← عام
 };
 
 // ---------- قوائم: كتلة أرقام لكل نوع ----------
@@ -108,7 +109,7 @@ namespace IdCheck
         { ID_STREAM_SETTINGS, 1 }, { ID_STREAM_COPY_FIRST, 2 }, { ID_STREAM_ADAPT_FIRST, 2 },
         { ID_THEME_FIRST, Theme::THEME_COUNT }, { ID_ACCENT_FIRST, Theme::ACCENT_COUNT + 1 },
         { ID_ABOUT_GITHUB, 1 }, { ID_OPEN_CONFIG, 1 }, { ID_CHECK_UPDATE, 1 }, { ID_GET_UPDATE, 1 },
-        { ID_AUTOGAME_FIRST, 2 }, { ID_SETUP_AGAIN, 1 }, { ID_VCAM_TOGGLE, 1 }, { ID_OPEN_CRASHES, 1 },
+        { ID_AUTOGAME_FIRST, 2 }, { ID_SETUP_AGAIN, 1 }, { ID_VCAM_TOGGLE, 1 }, { ID_OPEN_CRASHES, 1 }, { ID_ADMIN_FIRST, 2 },
         { IDB_SCENE.first, IDB_SCENE.size }, { IDB_TARGET_TOGGLE.first, IDB_TARGET_TOGGLE.size },
         { IDB_TARGET_MENU.first, IDB_TARGET_MENU.size }, { IDB_APP_ROW.first, IDB_APP_ROW.size },
         { IDB_APP_MUTE.first, IDB_APP_MUTE.size }, { IDB_APP_DELETE.first, IDB_APP_DELETE.size },
