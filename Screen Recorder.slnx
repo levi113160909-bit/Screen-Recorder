@@ -5,4 +5,8 @@
   </Configurations>
   <Project Path="Screen Recorder/Screen Recorder.vcxproj" Id="0daaf9ee-2def-4c93-bf62-08eed44e796b" />
   <Project Path="VirtualCamera/VirtualCamera.vcxproj" Id="7c1d5e2a-4b9f-4a3e-9d61-2f8b0c7e5a14" />
+  <Project Path="installer/Installer.vcxproj" Id="5e2c8b41-7d3a-4f69-9b0e-1c4a2d7f8e63">
+    <BuildDependency Project="Screen Recorder/Screen Recorder.vcxproj" />
+    <BuildDependency Project="VirtualCamera/VirtualCamera.vcxproj" />
+  </Project>
 </Solution>

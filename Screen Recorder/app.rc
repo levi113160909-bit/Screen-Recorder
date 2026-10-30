@@ -1,10 +1,13 @@
 // Screen Recorder - resources
 // Program icon (shown in File Explorer and the taskbar)
+#pragma code_page(65001)   // Version.h is UTF-8
+#include "Version.h"
+
 1 ICON "app.ico"
 
 1 VERSIONINFO
- FILEVERSION 1,2,0,0
- PRODUCTVERSION 1,2,0,0
+ FILEVERSION APP_VER_MAJOR,APP_VER_MINOR,APP_VER_PATCH,0
+ PRODUCTVERSION APP_VER_MAJOR,APP_VER_MINOR,APP_VER_PATCH,0
  FILEOS 0x40004L
  FILETYPE 0x1L
 BEGIN
@@ -14,8 +17,8 @@ BEGIN
         BEGIN
             VALUE "FileDescription", "Screen Recorder"
             VALUE "ProductName", "Screen Recorder"
-            VALUE "FileVersion", "1.2.0"
-            VALUE "ProductVersion", "1.2.0"
+            VALUE "FileVersion", APP_VERSION_STR
+            VALUE "ProductVersion", APP_VERSION_STR
             VALUE "OriginalFilename", "Screen Recorder.exe"
         END
     END

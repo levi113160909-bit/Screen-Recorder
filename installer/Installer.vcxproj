@@ -1,0 +1,53 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Installer.vcxproj - مشروع التغليف (ما فيه كود)
+  ببناء Release: بيشغّل package.ps1 (zip + المثبّت بمجلد dist). ببناء Debug: ما بيعمل شي.
+  بيتبنى بعد البرنامج والكاميرا الافتراضية (BuildDependency بالـ slnx).
+-->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{5E2C8B41-7D3A-4F69-9B0E-1C4A2D7F8E63}</ProjectGuid>
+    <RootNamespace>Installer</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Makefile</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Makefile</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <NMakeBuildCommandLine>echo Installer: packaging runs in Release builds only</NMakeBuildCommandLine>
+    <NMakeReBuildCommandLine>echo Installer: packaging runs in Release builds only</NMakeReBuildCommandLine>
+    <NMakeCleanCommandLine>echo Installer: nothing to clean</NMakeCleanCommandLine>
+    <OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)x64\$(Configuration)\Installer\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <NMakeBuildCommandLine>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)package.ps1"</NMakeBuildCommandLine>
+    <NMakeReBuildCommandLine>powershell -NoProfile -ExecutionPolicy Bypass -File "$(ProjectDir)package.ps1"</NMakeReBuildCommandLine>
+    <NMakeCleanCommandLine>echo Installer: dist is kept on clean</NMakeCleanCommandLine>
+    <OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)x64\$(Configuration)\Installer\</IntDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="ScreenRecorder.iss" />
+    <None Include="package.ps1" />
+    <None Include="اقرأني.txt" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

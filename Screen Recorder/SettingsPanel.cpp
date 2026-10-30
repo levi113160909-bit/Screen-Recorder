@@ -6,7 +6,8 @@
 
 namespace
 {
-    constexpr int   ID_NAV_FIRST = ID_PANEL_USER + 900;
+    constexpr int   ID_NAV_FIRST = ID_PANEL_SETTINGS_NAV;
+    static_assert(ID_NAV_FIRST + SP_COUNT <= ID_PANEL_SETTINGS_NAV + 100, "قائمة الإعدادات أكبر من الأرقام المحجوزة إلها");
     constexpr float NAV_W = 200;
 
     struct PageInfo { wchar_t glyph; const wchar_t* name; const wchar_t* desc; };

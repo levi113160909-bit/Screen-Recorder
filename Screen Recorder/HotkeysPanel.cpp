@@ -9,8 +9,12 @@ namespace
     enum : int
     {
         ID_RESET_ALL = ID_PANEL_USER,
-        ID_ROW_FIRST = ID_PANEL_USER + 10     // الإجراء i: +i*4 (0 الاختصار ، 1 افتراضي ، 2 حذف)
+        // الإجراء i: +i*4 (0 الاختصار ، 1 افتراضي ، 2 حذف). بعد أرقام قائمة الإعدادات (+900..+999)
+        // لأن الاختصارات بتنعرض جوّاها، وعدد الصفوف بيكبر مع عدد المشاهد
+        ID_ROW_FIRST = ID_PANEL_USER + 1000
     };
+    // أقصى صفوف: الاختصارات العامة + 1000 مشهد (حجم IDB_SCENE بـ AppIds.h)
+    static_assert(ID_ROW_FIRST + (HK_COUNT + 1000) * 4 <= ID_PANEL_LAST, "HotkeysPanel: الصفوف طلعت برّا أرقام النوافذ");
     constexpr float INFO_H = 58, ROW_H = 58, GAP = 6, FOOT_H = 70, SECTION_H = 36;
 
     bool IsModifier(WPARAM vk)

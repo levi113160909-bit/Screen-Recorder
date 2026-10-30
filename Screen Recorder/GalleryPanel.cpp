@@ -19,6 +19,9 @@ namespace
         ID_CARD     = ID_PANEL_USER + 2000
     };
     constexpr int MAX_ITEMS = 300;
+    // المعرض بينعرض جوّا الإعدادات كمان: ممنوع يلمس أرقام قائمتها (+900..+999)
+    static_assert(ID_REFRESH < ID_PANEL_SETTINGS_NAV && ID_CARD >= ID_PANEL_SETTINGS_NAV + 100, "GalleryPanel IDs");
+    static_assert(ID_CARD + MAX_ITEMS * 8 <= ID_PANEL_LAST, "GalleryPanel: البطاقات طلعت برّا أرقام النوافذ");
 
     std::wstring Duration(LONGLONG d)
     {

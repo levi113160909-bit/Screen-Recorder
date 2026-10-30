@@ -22,6 +22,7 @@ enum SettingsPage : int
 // أرقام عناصر main.cpp جوّا نافذة الإعدادات = الرقم الأصلي + هالرقم
 // (لحتى توصل للنافذة، وهي بترجّعها لـ main.cpp بالرقم الأصلي)
 constexpr int SETTINGS_ID_OFFSET = 60000;
+static_assert(SETTINGS_ID_OFFSET > ID_PANEL_LAST, "أرقام الإعدادات لازم تكون بعد أرقام النوافذ");
 
 struct SettingsHooks
 {

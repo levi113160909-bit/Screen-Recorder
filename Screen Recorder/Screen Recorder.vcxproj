@@ -150,6 +150,27 @@
 
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="CrashLog.cpp" />
+    <ClCompile Include="UiStreamTab.cpp" />
+    <ClCompile Include="UiSourcesTab.cpp" />
+    <ClCompile Include="UiFrame.cpp" />
+    <ClCompile Include="Streaming.cpp" />
+    <ClCompile Include="SettingsPages.cpp" />
+    <ClCompile Include="Scenes.cpp" />
+    <ClCompile Include="SceneLayers.cpp" />
+    <ClCompile Include="ReplayControl.cpp" />
+    <ClCompile Include="Recording.cpp" />
+    <ClCompile Include="PreviewEdit.cpp" />
+    <ClCompile Include="PopupMenu.cpp" />
+    <ClCompile Include="FirstRunSetup.cpp" />
+    <ClCompile Include="Commands.cpp" />
+    <ClCompile Include="AudioControl.cpp" />
+    <ClCompile Include="AppUtil.cpp" />
+    <ClCompile Include="AppTray.cpp" />
+    <ClCompile Include="AppState.cpp" />
+    <ClCompile Include="AppSettings.cpp" />
+    <ClCompile Include="AppPanels.cpp" />
+    <ClCompile Include="AppIcon.cpp" />
     <ClCompile Include="MediaControls.cpp" />
     <ClCompile Include="PlayerPanel.cpp" />
     <ClCompile Include="VideoPlayer.cpp" />
@@ -212,6 +233,10 @@
     <ClInclude Include="AudioFilters.h" />
     <ClInclude Include="Replay.h" />
     <ClInclude Include="Ui.h" />
+    <ClInclude Include="Version.h" />
+    <ClInclude Include="CrashLog.h" />
+    <ClInclude Include="AppIds.h" />
+    <ClInclude Include="App.h" />
     <ClInclude Include="MediaControls.h" />
     <ClInclude Include="PlayerPanel.h" />
     <ClInclude Include="VideoPlayer.h" />
