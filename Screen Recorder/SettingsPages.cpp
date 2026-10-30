@@ -413,7 +413,7 @@ float DrawSettingsPage(int page, float L, float top, float R)
             Text(L"مسجّل الشاشة", g_fSection.Get(), Rect(l, y, r - 44, y + 22), Theme::Text);
             Text(L"الإصدار " + LtrText(APP_VERSION), g_fSmall.Get(), Rect(l, y + 22, r - 44, y + 40), Theme::SubText);
             y += 50;
-            Hint(L"تسجيل وبث وإعادة بواجهة عربية، مجاني ومفتوح المصدر");
+            Hint(L"تسجيل وبث وإعادة بواجهة عربية، مجاني، والكود متاح للاطلاع على GitHub");
             Hint(L"يضغط الفيديو على بطاقة الرسومات مباشرةً (NVIDIA NVENC) لجودة عالية وحمل خفيف");
             y += 4;
             DrawButton(Rect(r - 170, y, r, y + 32), L"صفحة المشروع", O + ID_ABOUT_GITHUB, false, true);

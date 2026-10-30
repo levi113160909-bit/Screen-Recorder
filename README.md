@@ -10,6 +10,7 @@
 ![NVIDIA](https://img.shields.io/badge/NVENC-H.264%20%7C%20HEVC-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
 ![Visual Studio](https://img.shields.io/badge/Visual%20Studio-2026-5C2D91?style=for-the-badge&logo=visualstudio&logoColor=white)
 ![Arabic UI](https://img.shields.io/badge/الواجهة-عربية-4F8CFF?style=for-the-badge)
+![License](https://img.shields.io/badge/License-PolyForm%20Strict-orange?style=for-the-badge)
 
 🔴 تسجيل • 📡 بث لعدة منصات • 🔁 لقطات الألعاب • 🎞️ مشاهد وطبقات • 🌐 تنبيهات البث • 📷 كاميرا افتراضية • ▶️ مشغّل وقص
 
@@ -304,6 +305,14 @@ flowchart LR
 | NVIDIA Video Codec SDK (`nvEncodeAPI.h`) | واجهة مشفّر NVIDIA | رخصة MIT من NVIDIA |
 
 </details>
+
+---
+
+## 📜 الترخيص
+
+- **البرنامج نفسه مجاني** لأي استخدام، بما في ذلك صناعة المحتوى والبث والربح منهما، ويمكنك مشاركة المثبّت كما هو. التفاصيل في [LICENSE-PROGRAM.txt](LICENSE-PROGRAM.txt).
+- **الكود متاح للاطلاع** تحت ترخيص [PolyForm Strict 1.0.0](LICENSE.md): يمكنك قراءته والتعلّم منه، ولا يُسمح بتعديله أو إعادة نشره أو استخدامه تجاريًا.
+- المكوّنات الخارجية تبقى تحت تراخيصها (انظر «مكتبات خارجية» أعلاه).
 
 ---
 

@@ -39,6 +39,7 @@ New-Item -ItemType Directory -Force (Join-Path $stage 'licenses') | Out-Null
 Copy-Item $exe (Join-Path $stage 'ScreenRecorder.exe')
 Copy-Item $dll $stage
 Copy-Item (Join-Path $PSScriptRoot 'اقرأني.txt') $stage
+Copy-Item (Join-Path $root 'LICENSE-PROGRAM.txt') (Join-Path $stage 'شروط الاستخدام.txt')
 Copy-Item (Join-Path $root 'VirtualCamera\LICENSE-VCamSample.txt') (Join-Path $stage 'licenses')
 Copy-Item (Join-Path $root 'VirtualCamera\wil\LICENSE.txt') (Join-Path $stage 'licenses\LICENSE-WIL.txt')
 Copy-Item (Join-Path $root 'Screen Recorder\third_party\webview2\LICENSE.txt') (Join-Path $stage 'licenses\LICENSE-WebView2.txt')

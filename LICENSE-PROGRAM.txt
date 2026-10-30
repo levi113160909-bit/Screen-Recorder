@@ -1,0 +1,50 @@
+﻿شروط استخدام برنامج «مسجّل الشاشة»
+====================================
+حقوق النشر © 2026 levi113160909-bit
+https://github.com/levi113160909-bit/Screen-Recorder
+
+تنطبق هذه الشروط على البرنامج الجاهز: ملف المثبّت (ScreenRecorder-Setup-*.exe)
+والنسخة المحمولة (zip) وكل ما فيهما. أما الكود المصدري فيخضع لترخيص
+PolyForm Strict 1.0.0 في الملف LICENSE.md.
+
+يُسمح لك مجانًا بما يلي:
+  - تثبيت البرنامج واستخدامه على أي عدد من الأجهزة ولأي غرض، بما في ذلك
+    تسجيل المحتوى وبثّه ونشره والربح منه (يوتيوب، تويتش، تيك توك وغيرها).
+    ما تسجّله أو تبثّه بالبرنامج ملكك أنت.
+  - مشاركة ملف المثبّت أو النسخة المحمولة مع غيرك كما هو تمامًا،
+    دون تعديل ودون مقابل.
+
+لا يُسمح لك بما يلي:
+  - بيع البرنامج أو تأجيره أو تقديمه مقابل أي مال، أو إرفاقه بمنتج مدفوع.
+  - تعديل البرنامج أو إعادة نشره بعد التعديل أو باسم آخر.
+  - حذف هذه الشروط أو إشارات حقوق النشر من البرنامج أو من الملفات المرفقة به.
+
+يأتي البرنامج «كما هو» دون أي ضمان، ولا يتحمّل المؤلف مسؤولية أي ضرر ينتج
+عن استخدامه، بالقدر الذي يسمح به القانون.
+
+المكوّنات الخارجية داخل البرنامج تخضع لتراخيصها الخاصة (مجلد licenses).
+
+
+Screen Recorder - Program Terms
+-------------------------------
+Copyright (c) 2026 levi113160909-bit
+
+These terms apply to the ready-to-use program (the installer, the portable zip
+and everything in them). The source code is licensed under PolyForm Strict 1.0.0
+(see LICENSE.md).
+
+You may, free of charge:
+  - Install and use the program on any number of devices for any purpose,
+    including recording, streaming and publishing content and earning money
+    from it. What you record or stream with the program belongs to you.
+  - Share the unmodified installer or portable zip with others, free of charge.
+
+You may not:
+  - Sell, rent or offer the program for money, or bundle it with a paid product.
+  - Modify the program or redistribute modified copies or under another name.
+  - Remove these terms or copyright notices from the program or its files.
+
+The program is provided "as is", without any warranty. As far as the law allows,
+the author is not liable for any damages arising from its use.
+
+Third-party components keep their own licenses (licenses folder).

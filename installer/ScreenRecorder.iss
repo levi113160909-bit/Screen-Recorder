@@ -59,6 +59,8 @@ UninstallDisplayName={#AppName}
 VersionInfoVersion={#AppVersion}
 VersionInfoProductName={#AppNameEn}
 VersionInfoDescription={#AppNameEn} Setup
+; صفحة "اتفاقية الترخيص" بالمثبّت (شروط استخدام البرنامج)
+LicenseFile=..\LICENSE-PROGRAM.txt
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -74,7 +76,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#BuildExe}"; DestDir: "{app}"; DestName: "{#AppExeName}"; Flags: ignoreversion
 Source: "{#BuildDll}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "اقرأني.txt"; DestDir: "{app}"; Flags: ignoreversion
-; رخص المكتبات المفتوحة المصدر (رخصة MIT بتطلب نوزّعها مع البرنامج)
+Source: "..\LICENSE-PROGRAM.txt"; DestDir: "{app}"; DestName: "شروط الاستخدام.txt"; Flags: ignoreversion
+; رخص المكتبات الخارجية (رخصة MIT بتطلب نوزّعها مع البرنامج)
 Source: "..\VirtualCamera\LICENSE-VCamSample.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\VirtualCamera\wil\LICENSE.txt"; DestDir: "{app}\licenses"; DestName: "LICENSE-WIL.txt"; Flags: ignoreversion
 Source: "..\Screen Recorder\third_party\webview2\LICENSE.txt"; DestDir: "{app}\licenses"; DestName: "LICENSE-WebView2.txt"; Flags: ignoreversion
