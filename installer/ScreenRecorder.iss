@@ -9,6 +9,9 @@
 ;      %LOCALAPPDATA%\Programs\Screen Recorder
 ;    (وبيقدر يختار "لكل المستخدمين" إذا بدو)
 ;  - إذا البرنامج مفتوح ، المثبّت بيطلب يتسكّر (AppMutex)
+;  - التحديث التلقائي: البرنامج بينزّل هالملف من صفحة الإصدار وبيشغّله بـ
+;      /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CURRENTUSER /relaunch=normal|tray
+;    فلازم اسم الملف بالإصدار يضل ScreenRecorder-Setup-<الإصدار>.exe
 ;  - إزالة التثبيت: بتشيل التشغيل مع ويندوز (والمهمة المجدولة بوضع المسؤول) ، والكاميرا الافتراضية (بموافقة المسؤول)،
 ;    وبتسأل إذا بدك تحذف الإعدادات. التسجيلات ما بتنلمس أبداً.
 ;  - AppId ثابت لازم ما يتغيّر أبداً (هو اللي بيخلّي الإصدار الجديد يتثبّت فوق القديم)
@@ -40,7 +43,7 @@ DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 DisableDirPage=auto
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+PrivilegesRequiredOverridesAllowed=commandline dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; ويندوز 10 الإصدار 2004 أو أحدث
@@ -83,12 +86,28 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; التحديث التلقائي (البرنامج بيشغّل المثبّت بالوضع الصامت): منرجّع نفتح البرنامج بعد ما نخلص
+; /relaunch=tray (كان مخفي جنب الساعة) أو normal. بلا /relaunch (تثبيت صامت عادي) ما منفتح شي
+Filename: "{app}\{#AppExeName}"; Parameters: "{code:RelaunchArgs}"; Flags: nowait; Check: ShouldRelaunch
 
 [Registry]
 ; "التشغيل مع ويندوز" (البرنامج بيكتبها من الإعدادات): منشيلها عند إزالة التثبيت
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "ScreenRecorder"; Flags: uninsdeletevalue dontcreatekey
 
 [Code]
+// ---- التحديث التلقائي (Updater.cpp ← RunSetup) ----
+function ShouldRelaunch(): Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:relaunch|}') <> '');
+end;
+
+function RelaunchArgs(Param: String): String;
+begin
+  Result := '--updated';
+  if CompareText(ExpandConstant('{param:relaunch|}'), 'tray') = 0 then
+    Result := Result + ' --tray';
+end;
+
 const
   // نفس VCAM_CLSID_STRING بـ VirtualCamera\VirtualCameraShared.h
   VCamKey = 'SOFTWARE\Classes\CLSID\{a319638e-7579-42dd-b59c-1430eabc002d}\InprocServer32';

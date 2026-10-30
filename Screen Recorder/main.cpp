@@ -46,6 +46,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         g_hotkeys.Apply(hwnd);
         LoadTargets();
         SyncStartupMode();          // التشغيل مع ويندوز: مفتاح Run أو جدولة المهام (حسب وضع المسؤول)
+        if (g_updatedNow)
+            Notify(Glyph::Check, Theme::Green, L"تم التحديث إلى الإصدار " + std::wstring(APP_VERSION),
+                   L"الجديد في صفحة المشروع: الإعدادات ← عام ← حول البرنامج");
+        else if (!g_updateFailedVersion.empty())
+            Notify(Glyph::Warning, Theme::Yellow, L"تعذّر التحديث التلقائي إلى " + g_updateFailedVersion,
+                   L"نزّل الإصدار من صفحة المشروع: الإعدادات ← عام ← حول البرنامج");
         if (g_elevationDeclined)
             Notify(Glyph::Warning, Theme::Yellow, L"يعمل البرنامج بصلاحية عادية",
                    L"لم تتم الموافقة على صلاحية المسؤول، فقد لا تعمل الاختصارات داخل بعض الألعاب");
@@ -108,15 +114,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             CheckDiskSpace();
         if (g_tick % 60 == 30 && g_tick > 90)   // كل ثانيتين: في لعبة؟
             CheckGame(hwnd);
-        if (g_tick == 300)                 // بعد 10 ثواني من الفتح: في تحديث؟ (مرة باليوم)
+        // في تحديث؟ بعد 10 ثواني من الفتح ، وكل 6 ساعات (البرنامج ممكن يضل شغّال أيام جنب الساعة)
+        if ((g_tick == 300 || (g_tick > 300 && g_tick % (30 * 60 * 60 * 6) == 300)) && !g_updateChecking)
         {
-            SYSTEMTIME st; GetLocalTime(&st);
-            const int today = st.wYear * 1000 + st.wMonth * 40 + st.wDay;
-            if (today != g_updateCheckDay && !g_updateChecking)
-            {
-                g_updateChecking = true;
-                CheckForUpdate(hwnd, APP_REPO, APP_VERSION, false);
-            }
+            g_updateChecking = true;
+            CheckForUpdate(hwnd, APP_REPO, APP_VERSION, false);
         }
         // اضغط لتتكلم: مفعّل (إله زر) ← المايك مكتوم إلا وانت ضاغط
         {
@@ -491,13 +493,56 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_updateCheckDay = st.wYear * 1000 + st.wMonth * 40 + st.wDay;
             g_update = *info;
             SaveSettings();
-            if (info->newer)
-                Notify(Glyph::Check, Theme::Accent, L"يتوفر إصدار جديد " + info->version, L"من الإعدادات ← عام ← حول البرنامج");
+            const bool ready = info->newer && g_updateReadyVersion == info->version && !g_updateReadyFile.empty();
+            if (info->newer && !ready)
+            {
+                // تلقائي: منبلّش التنزيل بالخلفية (بيخبّرك لما يخلص). يدوي: منخبّرك بس
+                const bool autoDl = g_autoUpdate && !info->setupUrl.empty();
+                if (autoDl)
+                    StartUpdateDownload(false);
+                if (manual || !autoDl)
+                    Notify(Glyph::Check, Theme::Accent, L"يتوفر إصدار جديد " + info->version,
+                           autoDl ? L"يُنزَّل الآن في الخلفية" : L"من الإعدادات ← عام ← حول البرنامج");
+            }
+            else if (ready && manual)
+                Notify(Glyph::Check, Theme::Green, L"الإصدار " + info->version + L" جاهز للتثبيت",
+                       L"من الإعدادات ← عام ← حول البرنامج ← «تحديث الآن»");
             else if (manual)
                 Notify(Glyph::Check, Theme::Green, L"لديك أحدث إصدار", L"الإصدار " + std::wstring(APP_VERSION));
         }
         else if (manual)
             Notify(Glyph::Warning, Theme::Yellow, L"تعذّر التحقق من التحديثات", L"تحقّق من الاتصال بالإنترنت");
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+
+    case WM_UPDATE_DOWNLOAD:      // خلص تنزيل التحديث (Updater.h)
+    {
+        std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lParam));
+        if (wParam == 1 && path)
+        {
+            g_updateReadyFile    = *path;
+            g_updateReadyVersion = g_update.version;
+            g_updateTries        = 0;
+            SaveSettings();
+            if (g_installAfterDownload)
+            {
+                g_installAfterDownload = false;
+                InstallUpdateNow();
+            }
+            else if (IsInstalledCopy() && g_autoUpdate)
+                Notify(Glyph::Check, Theme::Green, L"الإصدار " + g_updateReadyVersion + L" جاهز",
+                       L"يُثبَّت عند فتح البرنامج المرة القادمة، أو الآن من الإعدادات ← حول");
+            else
+                Notify(Glyph::Check, Theme::Green, L"الإصدار " + g_updateReadyVersion + L" جاهز",
+                       L"ثبّته من الإعدادات ← عام ← حول البرنامج ← «تحديث الآن»");
+        }
+        else
+        {
+            if (g_installAfterDownload)
+                Notify(Glyph::Warning, Theme::Yellow, L"تعذّر تنزيل التحديث", L"تحقّق من الاتصال بالإنترنت وحاول مجددًا");
+            g_installAfterDownload = false;
+        }
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
@@ -696,6 +741,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR cmdLine, int nCmdShow)
     // نسخة وحدة بس: إذا البرنامج شغّال (حتى لو مخبّى جنب الساعة) منبيّنه ومنطلع
     // (منفحص أول شي، قبل ما نفتح الصوت والكاميرا)
     HANDLE single = CreateMutexW(nullptr, TRUE, L"ScreenRecorder_SingleInstance");
+    g_singleInstance = single;
     if (single && GetLastError() == ERROR_ALREADY_EXISTS && elevatedRestart &&
         WaitForSingleObject(single, 20000) != WAIT_TIMEOUT)
     {
@@ -735,6 +781,42 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR cmdLine, int nCmdShow)
     }
 
     LoadSettings();
+
+    // تحديث منزّل من المرة الماضية؟ (Updater.h) منثبّته هلق قبل ما نفتح شي:
+    // منشغّل المثبّت بالوضع الصامت ومنطلع ، وهو بيعيد فتح البرنامج الجديد بـ --updated
+    const bool justUpdated = cmdLine && wcsstr(cmdLine, L"--updated") != nullptr;
+    g_updatedNow = justUpdated && g_updateReadyVersion == APP_VERSION;
+    if (!g_updateReadyFile.empty())
+    {
+        const bool exists = GetFileAttributesW(g_updateReadyFile.c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (!exists || !IsNewerVersion(g_updateReadyVersion, APP_VERSION) || g_updateTries >= 2)
+        {
+            // انثبّت (أو صار قديم ، أو فشل مرتين: ما منعلق بحلقة) ، منمسحه
+            const bool failed = exists && IsNewerVersion(g_updateReadyVersion, APP_VERSION);
+            if (failed)
+                g_updateFailedVersion = g_updateReadyVersion;
+            g_updateReadyFile.clear();
+            g_updateReadyVersion.clear();
+            g_updateTries = 0;
+            ClearUpdatesFolder();
+            SaveSettings();
+        }
+        else if (g_autoUpdate && IsInstalledCopy() && !justUpdated)
+        {
+            ++g_updateTries;
+            SaveSettings();
+            ReleaseMutex(single);                // المثبّت بيستنى ما يكون البرنامج شغّال
+            CloseHandle(single);
+            if (RunSetup(g_updateReadyFile, true, startHidden))
+            {
+                MFShutdown();
+                CoUninitialize();
+                return 0;
+            }
+            single = CreateMutexW(nullptr, TRUE, L"ScreenRecorder_SingleInstance");   // ما اشتغل: منكمّل عادي
+            g_singleInstance = single;
+        }
+    }
 
     // وضع المسؤول (الإعدادات ← عام ← الصلاحية): منعيد فتح البرنامج كمسؤول قبل ما نفتح الصوت والنافذة
     if (g_runAsAdmin && !IsElevated() && !elevatedRestart)

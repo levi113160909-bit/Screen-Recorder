@@ -11,8 +11,8 @@
 #define SCREEN_RECORDER_VERSION_H
 
 #define APP_VER_MAJOR    1
-#define APP_VER_MINOR    4
-#define APP_VER_PATCH    0
-#define APP_VERSION_STR  "1.4.0"     /* لازم يطابق الأرقام فوق */
+#define APP_VER_MINOR    5
+#define APP_VER_PATCH    1
+#define APP_VERSION_STR  "1.5.1"     /* لازم يطابق الأرقام فوق */
 
 #endif

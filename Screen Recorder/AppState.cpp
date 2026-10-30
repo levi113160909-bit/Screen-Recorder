@@ -166,6 +166,14 @@ const wchar_t* APP_REPO       = L"levi113160909-bit/Screen-Recorder";
 UpdateInfo   g_update;                 // نتيجة آخر فحص للتحديثات
 
 int          g_updateCheckDay = 0;     // آخر يوم فحصنا فيه (مرة باليوم بس)
+bool         g_autoUpdate     = true;  // التحديثات تتنزّل وتتثبّت لحالها
+std::wstring g_updateReadyVersion;     // تحديث منزّل وجاهز للتثبيت
+std::wstring g_updateReadyFile;
+int          g_updateTries    = 0;
+bool         g_installAfterDownload = false;
+HANDLE       g_singleInstance = nullptr;
+bool         g_updatedNow = false;
+std::wstring g_updateFailedVersion;
 
 bool         g_updateChecking = false;
 

@@ -239,6 +239,14 @@ extern const wchar_t* APP_REPO;
 extern UpdateInfo g_update;   // نتيجة آخر فحص للتحديثات
 extern int g_updateCheckDay;   // آخر يوم فحصنا فيه (مرة باليوم بس)
 extern bool g_updateChecking;
+extern bool g_autoUpdate;                 // الإعداد: التحديثات تتنزّل وتتثبّت لحالها
+extern std::wstring g_updateReadyVersion; // تحديث منزّل وجاهز (Updater.h)
+extern std::wstring g_updateReadyFile;
+extern int  g_updateTries;                // كم مرة جرّبنا نثبّت هالتحديث (لحتى ما نعلق بحلقة)
+extern bool g_installAfterDownload;       // "تحديث الآن" قبل ما يخلص التنزيل
+extern HANDLE g_singleInstance;
+extern bool g_updatedNow;                 // البرنامج انفتح بعد تحديث ناجح هلق (--updated)
+extern std::wstring g_updateFailedVersion;  // التحديث التلقائي فشل لهالإصدار (منخبّرك)           // قفل "نسخة وحدة بس" (منفلته قبل تشغيل المثبّت)
 extern int g_overlayCorner;   // مؤشر التسجيل: 0 مخفي ، 1 أعلى اليمين ، 2 أعلى اليسار ، 3 أسفل اليمين ، 4 أسفل اليسار
 extern RecordingOverlay g_overlay;
 extern TrayIcon g_tray;
@@ -311,6 +319,9 @@ void LoadSettings();
 bool IsRunAtStartup();
 void SetRunAtStartup(bool on);
 void SyncStartupMode();
+// ---- التحديثات (Commands.cpp) ----
+void InstallUpdateNow();
+void StartUpdateDownload(bool userAsked);
 
 // ---- ReplayControl.cpp: الإعادة: التسجيل المستمر بالذاكرة، الحفظ، وكشف الألعاب ----
 std::wstring ReplayFolder();
@@ -444,7 +455,8 @@ namespace MsgCheck
 {
     inline constexpr UINT ALL[] = {
         WM_RECORDER_DONE, WM_STREAMER_DONE, WM_TRAY, WM_SHOWAPP, WM_HOTKEY_CAPTURE, WM_PUSH_TO_TALK,
-        WM_SCREENSHOT_DONE, WM_UPDATE_RESULT, WM_STREAM_COPY_SAVED, WM_VCAM_RESULT, WM_TEST_CRASH };
+        WM_SCREENSHOT_DONE, WM_UPDATE_RESULT, WM_STREAM_COPY_SAVED, WM_VCAM_RESULT, WM_TEST_CRASH,
+        WM_UPDATE_DOWNLOAD };
     constexpr bool Unique()
     {
         for (size_t i = 0; i < std::size(ALL); ++i)

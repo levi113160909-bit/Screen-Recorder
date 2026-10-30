@@ -162,6 +162,10 @@ void SaveSettings()
     put(L"UpdateCheckDay", std::to_wstring(g_updateCheckDay));
     put(L"Toasts",         g_toastsOn ? L"1" : L"0");
     put(L"RunAsAdmin",     g_runAsAdmin ? L"1" : L"0");
+    put(L"AutoUpdate",     g_autoUpdate ? L"1" : L"0");
+    put(L"UpdateReadyVersion", g_updateReadyVersion);
+    put(L"UpdateReadyFile",    g_updateReadyFile);
+    put(L"UpdateTries",        std::to_wstring(g_updateTries));
     put(L"OverlayOverApp", g_overlayOverApp ? L"1" : L"0");
     put(L"TrayHintShown",  g_trayHintShown ? L"1" : L"0");
     put(L"SystemAudio", g_systemOn ? L"1" : L"0");
@@ -253,6 +257,10 @@ void LoadSettings()
     Theme::Apply(g_themeChoice, g_accentChoice, g_accentCustom);
     g_toastsOn       = getInt(L"Toasts", 1) != 0;
     g_runAsAdmin     = getInt(L"RunAsAdmin", 0) != 0;
+    g_autoUpdate     = getInt(L"AutoUpdate", 1) != 0;
+    g_updateReadyVersion = getStr(L"UpdateReadyVersion");
+    g_updateReadyFile    = getStr(L"UpdateReadyFile");
+    g_updateTries        = getInt(L"UpdateTries", 0);
     g_overlayOverApp = getInt(L"OverlayOverApp", 1) != 0;
     g_trayHintShown  = getInt(L"TrayHintShown", 0) != 0;
     g_hotkeys.Load(g_settingsPath);

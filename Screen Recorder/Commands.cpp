@@ -5,6 +5,56 @@
 
 const wchar_t* APP_URL        = L"https://github.com/levi113160909-bit/Screen-Recorder";
 
+// -------------------------------------------------------------
+//  التحديثات (Updater.h)
+// -------------------------------------------------------------
+// تنزيل المثبّت بالخلفية. userAsked = "تحديث الآن": منثبّت أول ما يخلص
+void StartUpdateDownload(bool userAsked)
+{
+    if (userAsked)
+        g_installAfterDownload = true;
+    if (UpdateDownloading())
+        return;
+    ClearUpdatesFolder();                  // ما منكوّم نسخ قديمة
+    g_updateReadyFile.clear();
+    g_updateReadyVersion.clear();
+    SaveSettings();
+    DownloadUpdate(g_hwnd, g_update, UpdatesFolder());
+}
+
+// تثبيت التحديث المنزّل هلق: منسكّر البرنامج ، والمثبّت بيعيد فتحه بعد ما يخلص
+void InstallUpdateNow()
+{
+    if (g_updateReadyFile.empty())
+        return;
+    if (Busy() || g_streamer.IsActive())
+    {
+        ShowMessage(L"أوقف التسجيل والبث أولًا، ثم ثبّت التحديث", true);
+        return;
+    }
+    const bool installed = IsInstalledCopy();
+    // النسخة المثبّتة: صامت وبيرجع يفتح البرنامج. النسخة المحمولة: المثبّت العادي (التالي ← التالي)
+    ++g_updateTries;
+    SaveSettings();
+    SaveScenes();
+    if (g_singleInstance)                  // المثبّت بيستنى ما يكون البرنامج شغّال
+    {
+        ReleaseMutex(g_singleInstance);
+        CloseHandle(g_singleInstance);
+        g_singleInstance = nullptr;
+    }
+    if (!RunSetup(g_updateReadyFile, installed, false))
+    {
+        --g_updateTries;
+        SaveSettings();
+        g_singleInstance = CreateMutexW(nullptr, TRUE, L"ScreenRecorder_SingleInstance");
+        ShowMessage(L"تعذّر تشغيل المثبّت", true);
+        return;
+    }
+    g_reallyQuit = true;
+    DestroyWindow(g_hwnd);
+}
+
 void OnClick(int id, D2D1_POINT_2F p)
 {
     const bool rec = Busy();
@@ -198,7 +248,20 @@ void OnClick(int id, D2D1_POINT_2F p)
     }
     if (id == ID_GET_UPDATE)
     {
-        ShellExecuteW(nullptr, L"open", g_update.url.empty() ? APP_URL : g_update.url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (!g_updateReadyFile.empty())
+            InstallUpdateNow();                            // منزّل وجاهز
+        else if (!g_update.setupUrl.empty())
+            StartUpdateDownload(true);                     // منزّله وبعدين منثبّته فورًا
+        else                                               // الإصدار ما فيه مثبّت: منفتح صفحته
+            ShellExecuteW(nullptr, L"open", g_update.url.empty() ? APP_URL : g_update.url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return;
+    }
+    if (id >= ID_AUTOUPDATE_FIRST && id < ID_AUTOUPDATE_FIRST + 2)
+    {
+        g_autoUpdate = (id == ID_AUTOUPDATE_FIRST);
+        SaveSettings();
+        if (g_autoUpdate && g_update.newer && g_updateReadyFile.empty())
+            StartUpdateDownload(false);
         return;
     }
     if (id == ID_OPEN_CRASHES)

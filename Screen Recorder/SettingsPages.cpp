@@ -397,6 +397,15 @@ float DrawSettingsPage(int page, float L, float top, float R)
             }
             y += 64;
         });
+        Option(L"التحديثات", [&]
+        {
+            DrawSegmented(Rect(l, y, r, y + 34), { L"تلقائية", L"إشعار فقط" }, g_autoUpdate ? 0 : 1, O + ID_AUTOUPDATE_FIRST, true);
+            y += 40;
+            Hint(g_autoUpdate ? std::wstring(L"تُنزَّل في الخلفية وتُثبَّت عند فتح البرنامج المرة القادمة، أو فورًا من «تحديث الآن»")
+                              : std::wstring(L"يخبرك البرنامج فقط عند توفر إصدار جديد"));
+            if (!IsInstalledCopy())
+                Hint(L"هذه نسخة محمولة (zip): «تحديث الآن» يفتح المثبّت، وبعدها تصلك التحديثات تلقائيًا", Theme::Off);
+        });
         Option(L"حول البرنامج", [&]
         {
             Circle(r - 18, y + 20, 16, Theme::Red);
@@ -413,11 +422,23 @@ float DrawSettingsPage(int page, float L, float top, float R)
             DrawButton(Rect(r - 170, y, r, y + 32), L"تقارير الأعطال", O + ID_OPEN_CRASHES, false, true, L"\uE7BA");
             Tip(O + ID_OPEN_CRASHES, L"إذا توقّف البرنامج فجأة يُحفظ هنا تقرير يساعد في إصلاح الخطأ");
             y += 40;
-            // التحديثات
-            if (g_update.newer)
+            // التحديثات: الحالة + زر
+            const int pct = g_updateDownloadPercent;
+            if (pct >= 0)
+                Hint(L"جارٍ تنزيل الإصدار " + LtrText(g_update.version) + L"… " + LtrText(std::to_wstring(pct) + L"%"), Theme::Accent);
+            else if (!g_updateReadyFile.empty())
+            {
+                Hint(L"الإصدار " + LtrText(g_updateReadyVersion) + L" جاهز" +
+                     (IsInstalledCopy() && g_autoUpdate ? std::wstring(L"، ويُثبَّت عند فتح البرنامج المرة القادمة") : std::wstring()),
+                     Theme::Green);
+                DrawButton(Rect(r - 170, y, r, y + 32), L"تحديث الآن", O + ID_GET_UPDATE, true, !Busy());
+                Tip(O + ID_GET_UPDATE, L"يُغلق البرنامج ويثبّت الإصدار الجديد ثم يفتحه من جديد");
+                y += 40;
+            }
+            else if (g_update.newer)
             {
                 Hint(L"يتوفر إصدار جديد: " + LtrText(g_update.version), Theme::Green);
-                DrawButton(Rect(r - 220, y, r, y + 32), L"تنزيل الإصدار " + LtrText(g_update.version), O + ID_GET_UPDATE, true, true);
+                DrawButton(Rect(r - 220, y, r, y + 32), L"تنزيل وتثبيت " + LtrText(g_update.version), O + ID_GET_UPDATE, true, !Busy());
                 y += 40;
             }
             DrawButton(Rect(r - 200, y, r, y + 32), g_updateChecking ? L"جارٍ التحقق…" : L"التحقق من التحديثات",
