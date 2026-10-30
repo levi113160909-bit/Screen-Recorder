@@ -265,7 +265,7 @@ int          g_codec          = 0;     // صيغة الضغط: 0 H.264 ، 1 HEVC
 int          g_themeChoice    = 0;     // الثيم: 0 داكن ، 1 أسود ، 2 كحلي
 int          g_accentChoice   = 0;     // اللون الأساسي (ACCENT_COUNT = مخصّص)
 UINT32       g_accentCustom   = 0x4F8CFF;   // اللون المخصّص
-const wchar_t* APP_VERSION    = L"1.1.0";
+const wchar_t* APP_VERSION    = L"1.2.0";
 const wchar_t* APP_URL        = L"https://github.com/levi113160909-bit/Screen-Recorder";
 const wchar_t* APP_REPO       = L"levi113160909-bit/Screen-Recorder";
 UpdateInfo   g_update;                 // نتيجة آخر فحص للتحديثات
