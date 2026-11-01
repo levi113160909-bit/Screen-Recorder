@@ -3,6 +3,7 @@
 // =============================================================
 #include "AddSourcePanel.h"
 #include "AppAudio.h"
+#include "CaptureDevice.h"
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
@@ -13,9 +14,10 @@ namespace
     {
         ID_SEARCH_CLEAR = ID_PANEL_USER,
         ID_SEARCH_BOX,
-        ID_IMAGE, ID_TEXT, ID_APP_AUDIO, ID_REGION, ID_WEB,
+        ID_IMAGE, ID_TEXT, ID_APP_AUDIO, ID_REGION, ID_WEB, ID_TRANSLATE,
         ID_MONITOR_FIRST = ID_PANEL_USER + 100,
         ID_CAMERA_FIRST  = ID_PANEL_USER + 200,
+        ID_DEVICE_FIRST  = ID_PANEL_USER + 250,
         ID_WINDOW_FIRST  = ID_PANEL_USER + 300
     };
 
@@ -184,7 +186,7 @@ float AddSourcePanel::Layout(float L, float y, float R, bool draw)
     // ---- إضافة سريعة (بتختفي وقت البحث) ----
     if (m_search.empty())
     {
-        Section(L"إضافة سريعة", 5);
+        Section(L"إضافة سريعة", 6);
         struct Tile { int id; const wchar_t* glyph; const wchar_t* title; const wchar_t* sub; };
         const Tile tiles[] = {
             { ID_REGION,    Icon::Monitor, L"جزء من الشاشة", L"حدّد المنطقة بالسحب" },
@@ -192,9 +194,10 @@ float AddSourcePanel::Layout(float L, float y, float R, bool draw)
             { ID_IMAGE,     Icon::Photo,   L"صورة",          L"من ملف على الجهاز" },
             { ID_TEXT,      Icon::Font,    L"نص",            L"عنوان أو رسالة" },
             { ID_APP_AUDIO, Icon::Speaker, L"صوت برنامج",    L"صوت تطبيق واحد فقط" },
+            { ID_TRANSLATE, L"\xE8C1",    L"ترجمة اللعبة",  L"العربية فوق الإنكليزية" },
         };
         const float tw = (R - L - GAP * 2) / 3;
-        for (int k = 0; k < 5; ++k)
+        for (int k = 0; k < (int)std::size(tiles); ++k)
         {
             const float right = R - (k % 3) * (tw + GAP);  // الأول على اليمين ، 3 بكل سطر
             const float ty = y + (k / 3) * (TILE_H + GAP);
@@ -263,10 +266,23 @@ float AddSourcePanel::Layout(float L, float y, float R, bool draw)
         }
     }
 
+    // ---- أجهزة الالتقاط (بلايستيشن ، إكس بوكس...) ----
+    std::vector<int> devs;
+    for (int i = 0; i < (int)m_cameras.size(); ++i)
+        if (LooksLikeCaptureCard(m_cameras[i].name) && Matches(m_cameras[i].name, L"جهاز التقاط بلايستيشن"))
+            devs.push_back(i);
+    if (!devs.empty())
+    {
+        Section(L"أجهزة الالتقاط", (int)devs.size());
+        for (int i : devs)
+            y = DrawRow(y, L, R, ID_DEVICE_FIRST + i, nullptr, L"\xE7FC", m_cameras[i].name,
+                        L"بلايستيشن ، إكس بوكس ، سويتش (الصورة والصوت)", draw);
+    }
+
     // ---- الكاميرات ----
     std::vector<int> cams;
     for (int i = 0; i < (int)m_cameras.size(); ++i)
-        if (Matches(m_cameras[i].name, L"كاميرا"))
+        if (!LooksLikeCaptureCard(m_cameras[i].name) && Matches(m_cameras[i].name, L"كاميرا"))
             cams.push_back(i);
     if (!cams.empty())
     {
@@ -292,7 +308,7 @@ float AddSourcePanel::Layout(float L, float y, float R, bool draw)
         }
     }
 
-    if (mons.empty() && cams.empty() && wins.empty() && !m_search.empty())
+    if (mons.empty() && cams.empty() && devs.empty() && wins.empty() && !m_search.empty())
     {
         if (draw)
             Text(L"لا توجد نتائج لـ «" + m_search + L"»", g_fCenter.Get(), Rect(L, y + 10, R, y + 40), Theme::SubText);
@@ -319,13 +335,21 @@ void AddSourcePanel::OnClick(int id)
     if (id == ID_APP_AUDIO)    { CloseThen(a.appAudio); return; }
     if (id == ID_REGION)       { if (a.region) CloseThen(a.region); return; }
     if (id == ID_WEB)          { if (a.web) CloseThen(a.web); return; }
+    if (id == ID_TRANSLATE)    { if (a.translation) CloseThen(a.translation); return; }
+    if (id >= ID_DEVICE_FIRST && id < ID_WINDOW_FIRST && id - ID_DEVICE_FIRST < (int)m_cameras.size())
+    {
+        const CameraInfo c = m_cameras[id - ID_DEVICE_FIRST];
+        if (a.device)
+            CloseThen([fn = a.device, c] { fn(c); });
+        return;
+    }
     if (id >= ID_WINDOW_FIRST && id - ID_WINDOW_FIRST < (int)m_windows.size())
     {
         const CaptureTarget t = m_windows[id - ID_WINDOW_FIRST];
         CloseThen([fn = a.capture, t] { fn(t); });
         return;
     }
-    if (id >= ID_CAMERA_FIRST && id < ID_WINDOW_FIRST && id - ID_CAMERA_FIRST < (int)m_cameras.size())
+    if (id >= ID_CAMERA_FIRST && id < ID_DEVICE_FIRST && id - ID_CAMERA_FIRST < (int)m_cameras.size())
     {
         const CameraInfo c = m_cameras[id - ID_CAMERA_FIRST];
         CloseThen([fn = a.camera, c] { fn(c); });

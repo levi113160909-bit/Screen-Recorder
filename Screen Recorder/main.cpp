@@ -110,6 +110,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             StartReplay(true);
         if (g_streamer.IsActive())
             g_streamStatus = g_streamer.Status();
+        if (g_tick % 15 == 7)              // ترجمة اللعبة: تأخير الصورة والصوت
+            UpdateMediaDelays();
         if (g_tick % 150 == 75)            // كل 5 ثواني تقريباً
             CheckDiskSpace();
         if (g_tick % 60 == 30 && g_tick > 90)   // كل ثانيتين: في لعبة؟
@@ -709,6 +711,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_FRAME);
+        ShutdownTranslator();
         SaveScenes();
         g_hotkeys.UnregisterAll();
         g_streamer.Stop();

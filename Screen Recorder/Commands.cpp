@@ -77,6 +77,12 @@ void OnClick(int id, D2D1_POINT_2F p)
             g_appMixer.SetMuted(i, !g_appMixer.Entry(i).muted);
             SaveScenes();
         }
+        else if (IDB_APP_ROW.Has(id))                 // صوت جهاز التقاط: إعدادات الجهاز
+        {
+            const AppAudioEntry e = g_appMixer.Entry(IDB_APP_ROW.Index(id));
+            if (e.IsDevice())
+                OpenDevicePanelForAudio(e.deviceId);
+        }
         return;
     }
 

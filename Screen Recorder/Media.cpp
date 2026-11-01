@@ -4,6 +4,7 @@
 #include "Media.h"
 #include "BrowserSource.h"
 #include "Chroma.h"
+#include "Translator.h"
 
 #include <mfapi.h>
 #include <mfidl.h>
@@ -17,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -38,12 +40,39 @@ namespace
     ULONGLONG Now() { return GetTickCount64(); }
 
     // =========================================================
-    //  الكاميرا: بتشتغل بخيط لحالها وبتحفظ آخر صورة
+    //  الكاميرا وجهاز الالتقاط: بيشتغلوا بخيط لحالهم وبيحفظوا آخر صورة
+    //  (وإذا في تأخير للترجمة: آخر كم ثانية كمان)
     // =========================================================
+    std::atomic<int> g_deviceDelayMs{ 0 }, g_cameraDelayMs{ 0 };
+
+    // mode: -1 = كاميرا ويب (لحد 1080p و 30 إطار)
+    //        0 = جهاز التقاط تلقائي (لحد 1080p و 60) ، 1 = 1080p60 ، 2 = 1440p60 ، 3 = 4K30 ، 4 = 4K60
+    double FormatScore(UINT32 w, UINT32 h, double fps, const GUID& subtype, int mode)
+    {
+        double score = 0;
+        if (mode < 0)
+        {
+            if (h <= 1080) score += (double)w * h;
+            if (fps >= 29) score += 1e8;
+            if (fps > 61)  score -= 1e7;           // 120 هرتز ما منحتاجه
+            return score;
+        }
+        static const int MAX_H[]   = { 1080, 1080, 1440, 2160, 2160 };
+        static const int WANT_FPS[] = { 60, 60, 60, 30, 60 };
+        const int maxH = MAX_H[std::clamp(mode, 0, 4)], want = WANT_FPS[std::clamp(mode, 0, 4)];
+        if ((int)h <= maxH) score += (double)w * h * 100;     // الدقة أهم شي (لحد المطلوب)
+        else                score -= 1e12;                    // أعلى من المطلوب: بس إذا ما في غيرها
+        if (fps >= want - 1.5)                score += 1e10;  // الإطارات المطلوبة
+        else                                  score += fps * 1e8;
+        if (fps > want + 1.5)                 score -= 5e9;   // أكتر من اللازم (120 بدل 60)
+        if (subtype == MFVideoFormat_MJPG)    score -= 1e5;   // نفس الشي بس مضغوط: بياخد معالج أكتر
+        return score;
+    }
+
     class CameraDevice
     {
     public:
-        explicit CameraDevice(const std::wstring& link) : m_link(link)
+        CameraDevice(const std::wstring& link, int mode) : m_link(link), m_mode(mode)
         {
             m_created  = Now();
             m_lastUsed = m_created;
@@ -58,7 +87,22 @@ namespace
                 m_thread.join();
         }
 
-        std::shared_ptr<const MediaFrame> Latest()
+        // delayMs > 0: الصورة اللي وصلت قبل هالمدة (لمزامنة الترجمة)
+        std::shared_ptr<const MediaFrame> Latest(int delayMs = 0)
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_keepMs = std::max(0, delayMs);
+            if (delayMs <= 0 || m_history.empty())
+                return m_frame;
+            const ULONGLONG want = Now() - (ULONGLONG)delayMs;
+            for (auto it = m_history.rbegin(); it != m_history.rend(); ++it)
+                if ((*it)->tick <= want)
+                    return *it;
+            return m_history.front();         // لسا ما تجمّع كفاية (أول ثواني)
+        }
+
+        // آخر صورة حيّة بدون أي تأخير (للترجمة: لازم تقرا اللي عم يصير هلق)
+        std::shared_ptr<const MediaFrame> Live()
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             return m_frame;
@@ -66,6 +110,18 @@ namespace
 
         bool      Failed() const  { return m_failed; }
         ULONGLONG Created() const { return m_created; }
+        bool      LooksBlack() const
+        {
+            const ULONGLONG since = m_blackSince;
+            return since != 0 && Now() - since > 3000;
+        }
+        bool Format(int& w, int& h, double& fps) const
+        {
+            if (m_w <= 0 || m_h <= 0)
+                return false;
+            w = m_w; h = m_h; fps = m_fps;
+            return true;
+        }
         std::atomic<ULONGLONG> m_lastUsed{ 0 };
 
     private:
@@ -102,23 +158,21 @@ namespace
             if (FAILED(MFCreateSourceReaderFromMediaSource(m_source.Get(), ra.Get(), &m_reader)))
                 return false;
 
-            // منختار أحسن وضع: لحد 1080p و 30 إطار أو أكتر
+            // منختار أحسن وضع حسب النوع (كاميرا / جهاز التقاط والدقة المطلوبة)
             const DWORD stream = (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
             ComPtr<IMFMediaType> best;
-            double bestScore = -1;
+            double bestScore = -1e300;
             for (DWORD i = 0;; ++i)
             {
                 ComPtr<IMFMediaType> t;
                 if (FAILED(m_reader->GetNativeMediaType(stream, i, &t)))
                     break;
                 UINT32 w = 0, h = 0, n = 0, d = 1;
+                GUID sub = GUID_NULL;
                 MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h);
                 MFGetAttributeRatio(t.Get(), MF_MT_FRAME_RATE, &n, &d);
-                const double fps = d ? (double)n / d : 0;
-                double score = 0;
-                if (h <= 1080) score += (double)w * h;
-                if (fps >= 29) score += 1e8;
-                if (fps > 61)  score -= 1e7;           // 120 هرتز ما منحتاجه
+                t->GetGUID(MF_MT_SUBTYPE, &sub);
+                const double score = FormatScore(w, h, d ? (double)n / d : 0, sub, m_mode);
                 if (score > bestScore)
                 {
                     bestScore = score;
@@ -151,6 +205,21 @@ namespace
             }
         }
 
+        // الصورة سودا؟ (منفحص 16×9 نقطة بس: خفيف)
+        static bool IsBlack(const MediaFrame& f)
+        {
+            unsigned sum = 0, n = 0;
+            for (int gy = 0; gy < 9; ++gy)
+                for (int gx = 0; gx < 16; ++gx)
+                {
+                    const int x = (gx * 2 + 1) * f.width / 32, y = (gy * 2 + 1) * f.height / 18;
+                    const uint8_t* px = f.pixels.data() + ((size_t)y * f.width + x) * 4;
+                    sum += (px[0] + px[1] * 2 + px[2]) / 4;
+                    ++n;
+                }
+            return n > 0 && sum / n < 6;
+        }
+
         void Run()
         {
             if (!Open())
@@ -158,6 +227,8 @@ namespace
                 m_failed = true;
                 return;
             }
+            ULONGLONG fpsStart = Now();
+            int fpsCount = 0;
             while (m_running)
             {
                 DWORD index = 0, flags = 0;
@@ -171,7 +242,8 @@ namespace
                 }
                 if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)
                     ReadSize();
-                if (!sample || m_w <= 0 || m_h <= 0)
+                const int W = m_w, H = m_h;
+                if (!sample || W <= 0 || H <= 0)
                     continue;
 
                 ComPtr<IMFMediaBuffer> buffer;
@@ -179,9 +251,10 @@ namespace
                     continue;
 
                 auto frame = std::make_shared<MediaFrame>();
-                frame->width  = m_w;
-                frame->height = m_h;
-                frame->pixels.resize((size_t)m_w * m_h * 4);
+                frame->width  = W;
+                frame->height = H;
+                frame->tick   = Now();
+                frame->pixels.resize((size_t)W * H * 4);
 
                 BYTE* scan0 = nullptr;
                 LONG  pitch = 0;
@@ -196,53 +269,97 @@ namespace
                     if (FAILED(buffer->Lock(&raw, nullptr, &len)))
                         continue;
                     pitch = m_stride;
-                    scan0 = pitch < 0 ? raw + (size_t)(-pitch) * (m_h - 1) : raw;   // من تحت لفوق
+                    scan0 = pitch < 0 ? raw + (size_t)(-pitch) * (H - 1) : raw;   // من تحت لفوق
                 }
 
-                for (int y = 0; y < m_h; ++y)
+                for (int y = 0; y < H; ++y)
                 {
                     const BYTE* src = scan0 + (ptrdiff_t)y * pitch;
-                    BYTE* dst = frame->pixels.data() + (size_t)y * m_w * 4;
-                    memcpy(dst, src, (size_t)m_w * 4);
-                    for (int x = 0; x < m_w; ++x)
-                        dst[x * 4 + 3] = 255;           // RGB32 ما فيه شفافية
+                    BYTE* dst = frame->pixels.data() + (size_t)y * W * 4;
+                    memcpy(dst, src, (size_t)W * 4);
+                    uint32_t* px = reinterpret_cast<uint32_t*>(dst);
+                    for (int x = 0; x < W; ++x)
+                        px[x] |= 0xFF000000u;           // RGB32 ما فيه شفافية
                 }
 
                 if (locked2d) buf2d->Unlock2D();
                 else          buffer->Unlock();
 
+                // صورة سودا من فترة؟ (HDCP)
+                if (IsBlack(*frame)) { if (!m_blackSince) m_blackSince = frame->tick; }
+                else                 m_blackSince = 0;
+
+                // كم إطار بالثانية عم يوصل فعلياً
+                ++fpsCount;
+                if (frame->tick - fpsStart >= 1000)
+                {
+                    m_fps = fpsCount * 1000.0 / (double)(frame->tick - fpsStart);
+                    fpsStart = frame->tick;
+                    fpsCount = 0;
+                }
+
                 frame->version = g_version++;
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_frame = frame;
+                // التأخير: منحتفظ بآخر كم ثانية (حسب أكبر تأخير مطلوب)
+                if (m_keepMs > 0)
+                {
+                    m_history.push_back(frame);
+                    const ULONGLONG keep = (ULONGLONG)m_keepMs + 250;
+                    while (!m_history.empty() && frame->tick - m_history.front()->tick > keep)
+                        m_history.pop_front();
+                }
+                else if (!m_history.empty())
+                    m_history.clear();
             }
         }
 
         std::wstring              m_link;
+        int                       m_mode = -1;
         std::thread               m_thread;
         std::atomic<bool>         m_running{ false };
         std::atomic<bool>         m_failed{ false };
         ULONGLONG                 m_created = 0;
         std::mutex                m_mutex;
         std::shared_ptr<const MediaFrame> m_frame;
+        std::deque<std::shared_ptr<const MediaFrame>> m_history;   // للتأخير
+        int                       m_keepMs = 0;
+        std::atomic<ULONGLONG>    m_blackSince{ 0 };
+        std::atomic<double>       m_fps{ 0 };
 
         ComPtr<IMFMediaSource>    m_source;
         ComPtr<IMFSourceReader>   m_reader;
-        int                       m_w = 0, m_h = 0;
+        std::atomic<int>          m_w{ 0 }, m_h{ 0 };
         LONG                      m_stride = 0;
     };
 
     std::mutex g_camMutex;
-    std::map<std::wstring, std::shared_ptr<CameraDevice>> g_cams;
+    std::map<std::wstring, std::shared_ptr<CameraDevice>> g_cams;   // المفتاح: الرابط|الوضع
 
-    std::shared_ptr<const MediaFrame> CameraFrame(const std::wstring& link, bool* missing)
+    std::wstring CamKey(const std::wstring& link, int mode) { return link + L"|" + std::to_wstring(mode); }
+
+    std::shared_ptr<const MediaFrame> CameraFrame(const std::wstring& link, int mode, int delayMs, bool* missing)
     {
         std::vector<std::shared_ptr<CameraDevice>> closing;     // منسكّرهم برّا القفل (بياخدوا وقت)
         std::shared_ptr<CameraDevice> cam;
         {
             std::lock_guard<std::mutex> lock(g_camMutex);
             const ULONGLONG now = Now();
+            const std::wstring key = CamKey(link, mode);
 
-            auto& slot = g_cams[link];
+            // نفس الجهاز مفتوح بوضع تاني (غيّرت الدقة): منسكّر القديم (الجهاز ما بيقبل ينفتح مرتين)
+            for (auto it = g_cams.begin(); it != g_cams.end();)
+            {
+                if (it->first != key && it->first.compare(0, link.size() + 1, link + L"|") == 0)
+                {
+                    closing.push_back(it->second);
+                    it = g_cams.erase(it);
+                }
+                else
+                    ++it;
+            }
+
+            auto& slot = g_cams[key];
             // انفصلت؟ منجرّب نفتحها من جديد كل 3 ثواني
             if (slot && slot->Failed() && now - slot->Created() > 3000)
             {
@@ -250,7 +367,7 @@ namespace
                 slot.reset();
             }
             if (!slot)
-                slot = std::make_shared<CameraDevice>(link);
+                slot = std::make_shared<CameraDevice>(link, mode);
             slot->m_lastUsed = now;
             cam = slot;
 
@@ -268,7 +385,17 @@ namespace
         }
         if (missing)
             *missing = cam->Failed();
-        return cam->Failed() ? nullptr : cam->Latest();
+        return cam->Failed() ? nullptr : cam->Latest(delayMs);
+    }
+
+    // الجهاز المفتوح لهالرابط (بأي وضع) بدون ما نفتحه
+    std::shared_ptr<CameraDevice> OpenDevice(const std::wstring& link)
+    {
+        std::lock_guard<std::mutex> lock(g_camMutex);
+        for (auto& [key, cam] : g_cams)
+            if (cam && key.compare(0, link.size() + 1, link + L"|") == 0)
+                return cam;
+        return nullptr;
     }
 
     // =========================================================
@@ -518,7 +645,9 @@ std::shared_ptr<const MediaFrame> GetLayerFrame(const SceneLayer& layer, bool* m
         *missing = false;
     switch (layer.kind)
     {
-    case LayerKind::Camera: return ApplyChroma(layer, CameraFrame(layer.source, missing));
+    case LayerKind::Camera: return ApplyChroma(layer, CameraFrame(layer.source, -1, g_cameraDelayMs, missing));
+    case LayerKind::Device: return CameraFrame(layer.source, std::clamp(layer.mode, 0, 4), g_deviceDelayMs, missing);
+    case LayerKind::Translation: return TranslationLayerFrame(layer, missing);
     case LayerKind::Image:  return ImageFrame(layer.source, missing);
     case LayerKind::Text:   return TextFrame(layer);
     case LayerKind::Web:    return BrowserFrame(layer.source, layer.srcW, layer.srcH, missing);
@@ -534,8 +663,14 @@ bool MediaNaturalSize(const SceneLayer& layer, int& width, int& height)
         height = layer.srcH > 0 ? layer.srcH : 1080;
         return true;
     }
+    if (layer.kind == LayerKind::Translation)  // الترجمة: بحجم الطبقة نفسها (شريط عريض)
+    {
+        width  = 1600;
+        height = 220;
+        return true;
+    }
     std::shared_ptr<const MediaFrame> f = GetLayerFrame(layer);
-    if (layer.kind == LayerKind::Camera && !f)
+    if ((layer.kind == LayerKind::Camera || layer.kind == LayerKind::Device) && !f)
     {
         // الكاميرا لسا عم تفتح: منستنى شوي لأول صورة
         for (int i = 0; i < 30 && !f; ++i)
@@ -545,8 +680,8 @@ bool MediaNaturalSize(const SceneLayer& layer, int& width, int& height)
         }
         if (!f)
         {
-            width  = 1280;
-            height = 720;
+            width  = layer.kind == LayerKind::Device ? 1920 : 1280;
+            height = layer.kind == LayerKind::Device ? 1080 : 720;
             return true;
         }
     }
@@ -555,4 +690,36 @@ bool MediaNaturalSize(const SceneLayer& layer, int& width, int& height)
     width  = f->width;
     height = f->height;
     return true;
+}
+
+// =============================================================
+//  أجهزة الالتقاط + التأخير
+// =============================================================
+std::shared_ptr<const MediaFrame> PeekDeviceFrame(const std::wstring& link)
+{
+    std::shared_ptr<CameraDevice> cam = OpenDevice(link);
+    return cam && !cam->Failed() ? cam->Live() : nullptr;
+}
+
+bool DeviceLooksBlack(const std::wstring& link)
+{
+    std::shared_ptr<CameraDevice> cam = OpenDevice(link);
+    return cam && !cam->Failed() && cam->LooksBlack();
+}
+
+bool DeviceActualFormat(const std::wstring& link, int& width, int& height, double& fps)
+{
+    std::shared_ptr<CameraDevice> cam = OpenDevice(link);
+    return cam && !cam->Failed() && cam->Format(width, height, fps);
+}
+
+void SetMediaDelays(int deviceMs, int cameraMs)
+{
+    g_deviceDelayMs = std::clamp(deviceMs, 0, 10000);
+    g_cameraDelayMs = std::clamp(cameraMs, 0, 10000);
+}
+
+int MediaDelayMs(LayerKind kind)
+{
+    return kind == LayerKind::Device ? g_deviceDelayMs.load() : kind == LayerKind::Camera ? g_cameraDelayMs.load() : 0;
 }

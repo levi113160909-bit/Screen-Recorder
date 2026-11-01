@@ -193,12 +193,19 @@ bool PickImageFile(std::wstring& path)
 
 void RemoveLayer(int id)
 {
-    std::lock_guard<std::mutex> lock(g_scene.mutex);
-    const int i = FindLayer(id);
-    if (i >= 0)
-        g_scene.layers.erase(g_scene.layers.begin() + i);
-    if (g_selectedLayer == id)
-        g_selectedLayer = 0;
+    SceneLayer removed;
+    {
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        const int i = FindLayer(id);
+        if (i >= 0)
+        {
+            removed = g_scene.layers[i];
+            g_scene.layers.erase(g_scene.layers.begin() + i);
+        }
+        if (g_selectedLayer == id)
+            g_selectedLayer = 0;
+    }
+    OnDeviceLayerRemoved(removed);     // جهاز التقاط: صوته كمان بيروح
 }
 
 void PrimaryMonitorSize(int& w, int& h)
@@ -425,6 +432,11 @@ void LayerMediaCommand(int id, int code, POINT pt)
         modify([](SceneLayer& l) { l.background = !l.background; });
         RefitAspect(id);
         break;
+    case 120: OpenDevicePanel(id); return;                 // إعدادات جهاز الالتقاط
+    case 121: ConvertCameraLayer(id, false); return;       // جهاز التقاط -> كاميرا
+    case 122: ConvertCameraLayer(id, true); return;        // كاميرا -> جهاز التقاط
+    case 123: OpenTranslationPanel(id); return;            // إعدادات الترجمة
+    case 124: FitTranslationLayers(copy.source); return;   // فوق مكان الترجمة
     case 107:   // تحديث الصفحة
         BrowserReload(copy.source, copy.srcW, copy.srcH);
         return;
@@ -493,6 +505,19 @@ void ShowLayerMenu(int id, POINT screenPt)
         extra(L"الشكل…", 100);
         extra(copy.mirror ? L"إلغاء عكس الصورة" : L"عكس الصورة (مثل المرآة)", 101);
         extra(copy.chroma ? L"✓   إزالة الخلفية الخضراء…" : L"إزالة الخلفية الخضراء…", 106);
+        extra(L"استخدامها كجهاز التقاط (بلايستيشن…)", 122);
+    }
+    else if (copy.kind == LayerKind::Device)
+    {
+        extra(L"", -1);
+        extra(L"إعدادات جهاز الالتقاط…", 120);
+        extra(L"استخدامه ككاميرا", 121);
+    }
+    else if (copy.kind == LayerKind::Translation)
+    {
+        extra(L"", -1);
+        extra(L"إعدادات الترجمة…", 123);
+        extra(L"إعادة الطبقة فوق مكان الترجمة", 124);
     }
     else if (copy.kind == LayerKind::Image)
     {
@@ -604,6 +629,8 @@ void ShowAddSourceMenu(POINT)
         SaveScenes();
     };
     a.appAudio = [] { ShowAddAppAudioMenu({}); };
+    a.device   = [](const CameraInfo& c) { AddDeviceLayer(c); };
+    a.translation = [] { OpenTranslationPanel(0); };
     a.region   = [] { AddRegionLayer(); };
     a.web      = []
     {

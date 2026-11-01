@@ -24,6 +24,8 @@ struct AddSourceActions
     std::function<void()>                     appAudio;
     std::function<void()>                     region;     // جزء من الشاشة
     std::function<void()>                     web;        // صفحة ويب (تنبيهات، شات...)
+    std::function<void(const CameraInfo&)>    device;     // جهاز التقاط (بلايستيشن...)
+    std::function<void()>                     translation; // ترجمة اللعبة للعربي
 };
 
 class AddSourcePanel : public Panel

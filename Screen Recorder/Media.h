@@ -23,6 +23,7 @@ struct MediaFrame
     int                  width = 0, height = 0;
     std::vector<uint8_t> pixels;          // width * height * 4 ، من فوق لتحت
     uint64_t             version = 0;     // بيتغيّر مع كل صورة جديدة
+    ULONGLONG            tick = 0;        // إمتى وصلت (GetTickCount64) - للكاميرا وجهاز الالتقاط
 };
 
 struct CameraInfo
@@ -40,3 +41,16 @@ std::shared_ptr<const MediaFrame> GetLayerFrame(const SceneLayer& layer, bool* m
 
 // الحجم الطبيعي للطبقة (الصورة بحجمها ، النص حسب طوله ، الكاميرا حسب دقّتها)
 bool MediaNaturalSize(const SceneLayer& layer, int& width, int& height);
+
+// ---------- أجهزة الالتقاط ----------
+// آخر صورة حيّة (بلا تأخير) من جهاز مفتوح هلق (بأي دقة). فاضي = الجهاز مش مفتوح
+std::shared_ptr<const MediaFrame> PeekDeviceFrame(const std::wstring& link);
+// الصورة سودا من أكتر من 3 ثواني؟ (غالباً HDCP شغّال بالبلايستيشن)
+bool DeviceLooksBlack(const std::wstring& link);
+// دقة وإطارات الجهاز الفعلية (بعد ما انفتح). false = لسا ما انفتح
+bool DeviceActualFormat(const std::wstring& link, int& width, int& height, double& fps);
+
+// تأخير الصورة (لمزامنة الترجمة): أجهزة الالتقاط ، والكاميرات
+// كل الرسّامين (المعاينة ، التسجيل ، البث) بياخدوا الصورة المتأخرة نفسها
+void SetMediaDelays(int deviceMs, int cameraMs);
+int  MediaDelayMs(LayerKind kind);

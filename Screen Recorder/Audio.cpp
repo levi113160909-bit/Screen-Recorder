@@ -247,6 +247,19 @@ void AudioSource::Deliver(std::vector<float>& out)
     if (peak > m_peak.load())
         m_peak = peak;
 
+    // التأخير: منحط الصوت بطابور، ومنطلّع بس اللي صار أقدم من المدة المطلوبة
+    const int delayMs = m_delayMs;
+    if (delayMs > 0 || !m_delayLine.empty())
+    {
+        const size_t target = (size_t)delayMs * SAMPLE_RATE / 1000 * CHANNELS;
+        m_delayLine.insert(m_delayLine.end(), out.begin(), out.end());
+        const size_t ready = m_delayLine.size() > target ? m_delayLine.size() - target : 0;
+        out.assign(m_delayLine.begin(), m_delayLine.begin() + ready);
+        m_delayLine.erase(m_delayLine.begin(), m_delayLine.begin() + ready);
+        if (out.empty())
+            return;
+    }
+
     std::lock_guard<std::mutex> lock(m_mutex);
     for (auto& [id, tap] : m_taps)
     {

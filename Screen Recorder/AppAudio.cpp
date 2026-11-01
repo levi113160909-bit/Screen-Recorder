@@ -297,6 +297,22 @@ void AppAudioMixer::Connect(Child& c, const AudioApp& app)
     c.src     = std::move(src);
 }
 
+// صوت جهاز التقاط: متل المايك بس جهاز معيّن
+void AppAudioMixer::ConnectDevice(Child& c)
+{
+    auto src = std::make_unique<AudioSource>(AudioSource::Kind::Microphone);
+    src->SetDeviceId(c.e.deviceId);
+    src->SetVolume(c.e.volume);
+    src->SetMuted(c.e.muted);
+    c.lastTry = GetTickCount64();
+    if (!src->Start())
+        return;
+    c.tap = src->AddTap();
+    src->SetArmed(c.tap, true, true);
+    c.primed = false;
+    c.src    = std::move(src);
+}
+
 void AppAudioMixer::Disconnect(Child& c)
 {
     if (c.src)
@@ -319,7 +335,9 @@ void AppAudioMixer::SetEntries(const std::vector<AppAudioEntry>& entries)
     {
         fresh[i].e = entries[i];
         AudioApp app;
-        if (FindRunning(entries[i].exePath, app))
+        if (entries[i].IsDevice())
+            ConnectDevice(fresh[i]);
+        else if (FindRunning(entries[i].exePath, app))
             Connect(fresh[i], app);
     }
     {
@@ -345,7 +363,7 @@ void AppAudioMixer::Add(const AudioApp& app)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         for (const Child& c : m_children)
-            if (Lower(c.e.exePath) == Lower(app.exePath))
+            if (!c.e.IsDevice() && Lower(c.e.exePath) == Lower(app.exePath))
                 return;                      // موجود من قبل
     }
     Child c;
@@ -354,6 +372,36 @@ void AppAudioMixer::Add(const AudioApp& app)
     Connect(c, app);
     std::lock_guard<std::mutex> lock(m_mutex);
     m_children.push_back(std::move(c));
+}
+
+bool AppAudioMixer::AddDevice(const std::wstring& deviceId, const std::wstring& name, int delayMs)
+{
+    if (deviceId.empty() || FindDevice(deviceId) >= 0)
+        return false;
+    Child c;
+    c.e.deviceId = deviceId;
+    c.e.name     = name;
+    c.e.delayMs  = std::clamp(delayMs, 0, 2000);
+    ConnectDevice(c);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_children.push_back(std::move(c));
+    return true;
+}
+
+int AppAudioMixer::FindDevice(const std::wstring& deviceId)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (int i = 0; i < (int)m_children.size(); ++i)
+        if (m_children[i].e.IsDevice() && m_children[i].e.deviceId == deviceId)
+            return i;
+    return -1;
+}
+
+void AppAudioMixer::SetDelay(int index, int ms)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (index >= 0 && index < (int)m_children.size())
+        m_children[index].e.delayMs = std::clamp(ms, 0, 2000);
 }
 
 void AppAudioMixer::Remove(int index)
@@ -457,15 +505,17 @@ void AppAudioMixer::Reconnect()
             m_children[i].lastTry = GetTickCount64();
         }
         AudioApp app;
-        if (!FindRunning(probe.e.exePath, app))
-            continue;
-        Connect(probe, app);
+        if (probe.e.IsDevice())
+            ConnectDevice(probe);             // جهاز التقاط: منجرّب نفتحه (يمكن انوصل من جديد)
+        else if (FindRunning(probe.e.exePath, app))
+            Connect(probe, app);
         if (!probe.src)
             continue;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             // ممكن اللائحة تغيّرت بالنص (حذف أو تبديل مشهد): منتأكد إنه لسا نفس البرنامج
-            if (i < (int)m_children.size() && !m_children[i].src && m_children[i].e.exePath == probe.e.exePath)
+            if (i < (int)m_children.size() && !m_children[i].src && m_children[i].e.exePath == probe.e.exePath &&
+                m_children[i].e.deviceId == probe.e.deviceId)
             {
                 Child& c = m_children[i];
                 probe.src->SetVolume(c.e.volume);
@@ -488,8 +538,9 @@ void AppAudioMixer::Generate(float* out, size_t frames)
 {
     // قبل ما ناخد من برنامج، منستنى يتجمّع عنده 30 ملي ثانية زيادة
     // (الصوت بيوصل دفعات، فهيك ما بيصير تقطيع)
-    constexpr size_t PRIME = AudioSource::SAMPLE_RATE * 30 / 1000;
-    constexpr size_t KEEP  = AudioSource::SAMPLE_RATE / 10;      // أقصى تأخير 100 ملي ثانية
+    // التأخير (جهاز الالتقاط ، أو الترجمة) = منستنى يتجمّع أكتر بنفس المقدار
+    constexpr size_t BASE_PRIME = AudioSource::SAMPLE_RATE * 30 / 1000;
+    constexpr size_t BASE_KEEP  = AudioSource::SAMPLE_RATE / 10;      // أقصى تأخير 100 ملي ثانية
 
     std::lock_guard<std::mutex> lock(m_mutex);
     m_tmp.resize(frames * AudioSource::CHANNELS);
@@ -497,13 +548,20 @@ void AppAudioMixer::Generate(float* out, size_t frames)
     {
         if (!c.src)
             continue;
+        const int    delayMs = c.e.IsDevice() ? c.e.delayMs + m_extraDevice.load() : m_extraApp.load();
+        const size_t delay   = (size_t)std::max(0, delayMs) * AudioSource::SAMPLE_RATE / 1000;
+        const size_t PRIME   = BASE_PRIME + delay, KEEP = BASE_KEEP + delay;
+        if (c.primed && delay > c.primedFor)     // التأخير زاد: منرجع نستنى يتجمّع
+            c.primed = false;
         const size_t avail = c.src->Available(c.tap);
         if (!c.primed)
         {
             if (avail < frames + PRIME)
                 continue;
-            c.primed = true;
+            c.primed    = true;
+            c.primedFor = delay;
         }
+        c.primedFor = std::min(c.primedFor, delay);
         const size_t got = c.src->Read(c.tap, m_tmp.data(), frames);
         for (size_t i = 0; i < got * AudioSource::CHANNELS; ++i)
             out[i] += m_tmp[i];

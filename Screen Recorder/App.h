@@ -64,6 +64,10 @@
 #include "VirtualCam.h"
 #include "CrashLog.h"
 #include "Elevation.h"
+#include "CaptureDevice.h"
+#include "DevicePanel.h"
+#include "Translator.h"
+#include "TranslationPanel.h"
 #include <shobjidl.h>
 #include <commdlg.h>
 #include <wincrypt.h>
@@ -438,6 +442,22 @@ float DrawSettingsPage(int page, float L, float top, float R);
 // ---- UiStreamTab.cpp: تبويب البث: الوجهات، ملخّص الإعدادات، عدّاد الرفع، والكاميرا الافتراضية ----
 void ToggleVirtualCam();
 void DrawStreamTab(const D2D1_RECT_F& side, float y);
+
+// ---- DeviceControl.cpp: أجهزة الالتقاط بالمشهد: الإضافة ، الصوت ، ونافذة الإعدادات ----
+void AddDeviceLayer(const CameraInfo& c);
+void OnDeviceLayerRemoved(const SceneLayer& l);
+void SetDeviceAudio(int layerId, bool on);
+void PickDeviceAudio(int layerId);
+void OpenDevicePanel(int layerId);
+bool OpenDevicePanelForAudio(const std::wstring& audioId);
+void ConvertCameraLayer(int layerId, bool toDevice);
+
+// ---- TranslationControl.cpp: ترجمة الألعاب بالمشهد: إضافة الطبقة ، مكانها ، النافذة ، والتأخير ----
+std::vector<CameraInfo> SceneDevices();
+void AddTranslationLayer(const std::wstring& profileId);
+void FitTranslationLayers(const std::wstring& profileId);
+void OpenTranslationPanel(int layerId);
+void UpdateMediaDelays();
 
 // ---- AppTray.cpp: أيقونة جنب الساعة: الإخفاء والإظهار، قائمتها، والخروج ----
 void ShowFromTray();

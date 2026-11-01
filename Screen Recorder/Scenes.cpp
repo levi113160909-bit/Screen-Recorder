@@ -230,11 +230,11 @@ void SaveScenes()
         {
             if (l.kind != LayerKind::Capture)       // كاميرا / صورة / نص
             {
-                fwprintf(f, L"M\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%d\t%d\t%u\t%d\t%ls\t%ls\t%.5f\t%.5f\t%.5f\t%.5f\t%d\t%u\t%.3f\t%.3f\t%.3f\t%d\t%d\n",
+                fwprintf(f, L"M\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%d\t%d\t%u\t%d\t%ls\t%ls\t%.5f\t%.5f\t%.5f\t%.5f\t%d\t%u\t%.3f\t%.3f\t%.3f\t%d\t%d\t%d\t%ls\n",
                          (int)l.kind, l.x, l.y, l.w, l.h, l.visible ? 1 : 0, l.shape, l.mirror ? 1 : 0,
                          l.color, l.background ? 1 : 0, Clean(l.source).c_str(), Clean(l.target.name).c_str(),
                          l.cropL, l.cropT, l.cropR, l.cropB,
-                         l.chroma ? 1 : 0, l.chromaColor, l.chromaSim, l.chromaSmooth, l.chromaSpill, l.srcW, l.srcH);
+                         l.chroma ? 1 : 0, l.chromaColor, l.chromaSim, l.chromaSmooth, l.chromaSpill, l.srcW, l.srcH, l.mode, Clean(l.audioId).c_str());
                 continue;
             }
             const RECT& r = l.target.rect;
@@ -244,9 +244,9 @@ void SaveScenes()
                      Clean(l.target.className).c_str(), Clean(l.target.exePath).c_str(), Clean(l.target.name).c_str(),
                      l.cropL, l.cropT, l.cropR, l.cropB);
         }
-        for (const AppAudioEntry& a : s.apps)       // أصوات البرامج
-            fwprintf(f, L"P\t%d\t%d\t%ls\t%ls\n", (int)std::lround(a.volume * 100), a.muted ? 1 : 0,
-                     Clean(a.exePath).c_str(), Clean(a.name).c_str());
+        for (const AppAudioEntry& a : s.apps)       // أصوات البرامج (وأصوات أجهزة الالتقاط)
+            fwprintf(f, L"P\t%d\t%d\t%ls\t%ls\t%ls\t%d\n", (int)std::lround(a.volume * 100), a.muted ? 1 : 0,
+                     Clean(a.exePath).c_str(), Clean(a.name).c_str(), Clean(a.deviceId).c_str(), a.delayMs);
     }
     fclose(f);
 }
@@ -308,7 +308,7 @@ bool LoadScenes()
         {
             SceneLayer l;
             l.id          = g_scene.nextId++;
-            l.kind        = (LayerKind)std::clamp(_wtoi(p[1].c_str()), 1, 4);
+            l.kind        = (LayerKind)std::clamp(_wtoi(p[1].c_str()), (int)LayerKind::Camera, (int)LayerKind::Translation);
             l.x           = _wtof(p[2].c_str());
             l.y           = _wtof(p[3].c_str());
             l.w           = _wtof(p[4].c_str());
@@ -335,6 +335,10 @@ bool LoadScenes()
                 l.srcW = std::clamp(_wtoi(p[22].c_str()), 0, 3840);
                 l.srcH = std::clamp(_wtoi(p[23].c_str()), 0, 3840);
             }
+            if (p.size() >= 25)             // جهاز الالتقاط: الدقة
+                l.mode = std::clamp(_wtoi(p[24].c_str()), 0, 4);
+            if (p.size() >= 26)
+                l.audioId = p[25];
             if (l.kind == LayerKind::Web && (l.srcW < 16 || l.srcH < 16))
             {
                 l.srcW = 1920;
@@ -350,7 +354,12 @@ bool LoadScenes()
             a.muted   = p[2] == L"1";
             a.exePath = p[3];
             a.name    = p[4];
-            if (!a.exePath.empty())
+            if (p.size() >= 7)              // صوت جهاز التقاط
+            {
+                a.deviceId = p[5];
+                a.delayMs  = std::clamp(_wtoi(p[6].c_str()), 0, 2000);
+            }
+            if (!a.exePath.empty() || a.IsDevice())
                 g_scenes.back().apps.push_back(a);
         }
         else if (p[0] == L"L" && p.size() >= 14 && !g_scenes.empty())

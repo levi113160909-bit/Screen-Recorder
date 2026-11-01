@@ -99,18 +99,20 @@ void DrawAppAudioRow(const D2D1_RECT_F& row, int i)
     const bool hover     = AddHit(row, IDB_APP_ROW.Id(i));
     const bool delHover  = AddHit(del, IDB_APP_DELETE.Id(i));
     const bool muteHover = AddHit(mute, IDB_APP_MUTE.Id(i));
-    Tip(IDB_APP_DELETE.Id(i), L"إزالة البرنامج من الخلّاط");
+    Tip(IDB_APP_DELETE.Id(i), e.IsDevice() ? L"إزالة صوت الجهاز" : L"إزالة البرنامج من الخلّاط");
     Tip(IDB_APP_MUTE.Id(i), e.muted ? L"إلغاء الكتم" : L"كتم");
 
     Fill(row, hover ? Theme::Hover : Theme::Card, 10);
-    Text(Icon::Speaker, g_fIconBig.Get(), Rect(row.right - 44, row.top + 2, row.right - 10, row.top + 40),
+    Text(e.IsDevice() ? L"\xE7FC" : Icon::Speaker, g_fIconBig.Get(), Rect(row.right - 44, row.top + 2, row.right - 10, row.top + 40),
          connected ? Theme::Accent : Theme::SubText);
     Text(e.name, g_fBody.Get(), Rect(row.left + 76, row.top + 4, row.right - 50, row.top + 24),
          connected ? Theme::Text : Theme::SubText);
 
-    std::wstring sub = L"صوت برنامج";
+    std::wstring sub = e.IsDevice() ? (e.delayMs > 0 ? L"صوت جهاز التقاط • تأخير " + LtrText(std::to_wstring(e.delayMs)) + L" ملّي ث"
+                                                     : std::wstring(L"صوت جهاز التقاط"))
+                                    : std::wstring(L"صوت برنامج");
     D2D1_COLOR_F subColor = Theme::SubText;
-    if (!connected)   { sub = L"البرنامج غير مفتوح"; subColor = Theme::Yellow; }
+    if (!connected)   { sub = e.IsDevice() ? L"جهاز الصوت غير متصل" : L"البرنامج غير مفتوح"; subColor = Theme::Yellow; }
     else if (e.muted) { sub = L"مكتوم"; subColor = Theme::Red; }
     Text(sub, g_fSmall.Get(), Rect(row.left + 76, row.top + 23, row.right - 50, row.top + 41), subColor);
 
@@ -163,7 +165,10 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
     // أصوات البرامج بتنعرض بعد الطبقات: عنوان + سطر لكل برنامج (+ تنبيه إذا صوت النظام شغّال)
     const int   appCount = (int)g_appMixer.Count();
     const float appRowH  = 64;
-    const bool  appWarn  = appCount > 0 && g_systemOn;
+    bool anyApp = false;                  // برامج (مش أجهزة التقاط): صوت النظام بيلتقطها كمان
+    for (const AppAudioEntry& e : g_appMixer.Entries())
+        anyApp = anyApp || !e.IsDevice();
+    const bool  appWarn  = anyApp && g_systemOn;
     const float appsH    = appCount == 0 ? 0 : 32 + appCount * (appRowH + gap) + (appWarn ? 40 : 0);
     const float contentH = layers.size() * (rowH + gap) + appsH;
     const float listH    = g_listRect.bottom - g_listRect.top;
@@ -207,22 +212,30 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
         }
 
         const D2D1_COLOR_F textColor = l.visible ? Theme::Text : Theme::SubText;
-        const wchar_t* kindIcon = l.kind == LayerKind::Camera ? Icon::Camera : l.kind == LayerKind::Image ? Icon::Photo
+        const wchar_t* kindIcon = l.kind == LayerKind::Device ? L"\xE7FC" : l.kind == LayerKind::Translation ? L"\xE8C1"
+                                : l.kind == LayerKind::Camera ? Icon::Camera : l.kind == LayerKind::Image ? Icon::Photo
                                 : l.kind == LayerKind::Text ? Icon::Font : l.kind == LayerKind::Web ? Icon::Globe : (l.target.isMonitor ? Icon::Monitor : Icon::Window);
         Text(kindIcon, g_fIconBig.Get(),
              Rect(row.right - 44, row.top, row.right - 10, row.bottom), selected ? Theme::Accent : Theme::SubText);
         Text(l.target.name, g_fBody.Get(), Rect(row.left + 76, row.top + 5, row.right - 50, row.top + 27), textColor);
 
-        std::wstring sub = l.kind == LayerKind::Camera ? L"كاميرا" : l.kind == LayerKind::Image ? L"صورة"
+        std::wstring sub = l.kind == LayerKind::Device ? L"جهاز التقاط" : l.kind == LayerKind::Translation ? L"ترجمة عربية للبث"
+                         : l.kind == LayerKind::Camera ? L"كاميرا" : l.kind == LayerKind::Image ? L"صورة"
                          : l.kind == LayerKind::Text ? L"نص" : l.kind == LayerKind::Web ? L"صفحة ويب" : (l.target.isMonitor ? L"شاشة كاملة" : L"نافذة");
         D2D1_COLOR_F subColor = Theme::SubText;
         if (l.lost)
         {
-            sub = l.kind == LayerKind::Camera ? L"الكاميرا غير متصلة" : l.kind == LayerKind::Image ? L"الملف غير موجود"
+            sub = l.kind == LayerKind::Device ? L"جهاز الالتقاط غير متصل" : l.kind == LayerKind::Translation ? L"مصدر الترجمة غير متصل"
+                : l.kind == LayerKind::Camera ? L"الكاميرا غير متصلة" : l.kind == LayerKind::Image ? L"الملف غير موجود"
                 : l.kind == LayerKind::Web ? (BrowserRuntimeAvailable() ? L"تعذّر فتح الصفحة • إعادة المحاولة تلقائيًا" : L"يلزم تثبيت WebView2") : L"النافذة مغلقة";
             subColor = Theme::Red;
         }
         else if (!l.visible) { sub += L" • مخفية"; }
+        else if (l.kind == LayerKind::Device && DeviceLooksBlack(l.source))
+        {
+            sub = L"الصورة سوداء: أطفئ HDCP في الجهاز";
+            subColor = Theme::Yellow;
+        }
         Text(sub, g_fSmall.Get(), Rect(row.left + 76, row.top + 26, row.right - 50, row.top + 44), subColor);
 
         if (delHover) Fill(del, D2D1::ColorF(0xE5484D, 0.2f), 6);
@@ -238,7 +251,7 @@ void DrawSourcesTab(const D2D1_RECT_F& side, float y)
         g_hitClipOn = true;               // اللي برّا القائمة (مخفي بالتمرير) ما بينكبس
         g_hitClip   = g_listRect;
         float ay = g_listRect.top + layers.size() * (rowH + gap) - g_scroll;
-        Text(L"أصوات البرامج", g_fSection.Get(), Rect(g_listRect.left + 10, ay + 6, g_listRect.right - 10, ay + 28), Theme::SubText);
+        Text(anyApp ? L"أصوات البرامج والأجهزة" : L"أصوات الأجهزة", g_fSection.Get(), Rect(g_listRect.left + 10, ay + 6, g_listRect.right - 10, ay + 28), Theme::SubText);
         ay += 32;
         for (int i = 0; i < appCount; ++i)
         {

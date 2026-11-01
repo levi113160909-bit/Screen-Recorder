@@ -60,6 +60,10 @@ public:
     void  SetMuted(bool m)   { m_muted = m; }
     bool  IsMuted() const    { return m_muted; }
 
+    // تأخير الصوت (لمزامنة الترجمة: المايك بيتأخّر متل صورة اللعبة). المقياس بيضل حي
+    void SetDelayMs(int ms) { m_delayMs = ms < 0 ? 0 : (ms > 10000 ? 10000 : ms); }
+    int  DelayMs() const    { return m_delayMs; }
+
     // فلاتر الصوت (للمايك): إزالة الضجيج ، البوابة ، توحيد العلو
     MicFilters& Filters() { return m_filters; }
 
@@ -99,6 +103,8 @@ private:
     std::atomic<bool>  m_muted{ false };
     std::thread        m_thread;
     MicFilters         m_filters;
+    std::atomic<int>   m_delayMs{ 0 };
+    std::deque<float>  m_delayLine;      // الصوت المتأخّر (بخيط الصوت بس)
 
     struct Tap
     {
