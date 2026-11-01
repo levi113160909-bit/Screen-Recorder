@@ -47,6 +47,17 @@ namespace
     constexpr int MAX_PROFILES = 40, MAX_SOURCES = 30, MAX_GLOSSARY = 99, MAX_OVERLAY_SCREENS = 16;
     static_assert(ID_OVERLAY_MON_FIRST + MAX_OVERLAY_SCREENS < ID_PANEL_SETTINGS_NAV, "TranslationPanel: الأرقام وصلت لأرقام الإعدادات");
 
+    // ارتفاع نص طويل بعد ما ينلفّ على كذا سطر بهالعرض
+    float TextHeight(const std::wstring& s, IDWriteTextFormat* f, float width)
+    {
+        ComPtr<IDWriteTextLayout> layout;
+        if (s.empty() || !g_dwrite || FAILED(g_dwrite->CreateTextLayout(s.c_str(), (UINT32)s.size(), f, std::max(10.0f, width), 2000, &layout)))
+            return 20;
+        DWRITE_TEXT_METRICS m{};
+        layout->GetMetrics(&m);
+        return std::max(20.0f, std::ceil(m.height) + 2);
+    }
+
     std::wstring Seconds(int ms)
     {
         wchar_t buf[32];
@@ -265,13 +276,14 @@ float TranslationPanel::DrawSource(float y, float L, float R)
     // ---- شو عم يقرا هلق ----
     KeepTranslateSessionAlive(m_id);
     const TranslateStatus st = GetTranslateStatus(m_id);
-    const D2D1_RECT_F live = Rect(L, y, R, y + 96);
-    Fill(live, Theme::Card, 10);
-    Text(L"يقرأ الآن:", g_fSmall.Get(), Rect(R - 90, y + 8, R - 12, y + 28), Theme::SubText);
-    Text(st.lastEnglish.empty() ? std::wstring(L"—") : LtrText(st.lastEnglish), g_fSmall.Get(),
-         Rect(L + 12, y + 8, R - 96, y + 28), Theme::Text);
-    Text(L"الترجمة:", g_fSmall.Get(), Rect(R - 90, y + 34, R - 12, y + 54), Theme::SubText);
-    Text(st.lastArabic.empty() ? std::wstring(L"—") : st.lastArabic, g_fBody.Get(), Rect(L + 12, y + 32, R - 96, y + 56), Theme::Green);
+    // الجمل كاملة (بتنلفّ على كذا سطر ، والمربع بيكبر معها)
+    const std::wstring en = st.lastEnglish.empty() ? std::wstring(L"—") : LtrText(st.lastEnglish);
+    const std::wstring ar = st.lastArabic.empty() ? std::wstring(L"—") : st.lastArabic;
+    const float textW = (R - 96) - (L + 12);
+    const float enH = std::min(64.0f, TextHeight(en, g_fSmall.Get(), textW));     // 4 أسطر بالكتير
+    const float arH = std::min(120.0f, TextHeight(ar, g_fBody.Get(), textW));
+    const float arTop = y + 8 + enH + 8;
+    const float infoTop = arTop + arH + 8;
     std::wstring info;
     D2D1_COLOR_F infoColor = Theme::SubText;
     if (!st.error.empty())          { info = st.error; infoColor = Theme::Red; }
@@ -279,8 +291,15 @@ float TranslationPanel::DrawSource(float y, float L, float R)
     else
         info = L"تُرجمت " + LtrText(std::to_wstring(st.translated)) + L" جملة  •  من الذاكرة " + LtrText(std::to_wstring(st.fromCache))
              + (st.lastMs > 0 ? L"  •  آخر ترجمة " + LtrText(std::to_wstring(st.lastMs)) + L" ملّي ثانية" : std::wstring());
-    Text(info, g_fSmall.Get(), Rect(L + 12, y + 64, R - 12, y + 86), infoColor);
-    y += 104;
+    const float infoH = std::min(60.0f, TextHeight(info, g_fSmall.Get(), (R - 12) - (L + 12)));
+    const D2D1_RECT_F live = Rect(L, y, R, infoTop + infoH + 8);
+    Fill(live, Theme::Card, 10);
+    Text(L"يقرأ الآن:", g_fSmall.Get(), Rect(R - 90, y + 8, R - 12, y + 28), Theme::SubText);
+    Text(en, g_fSmall.Get(), Rect(L + 12, y + 8, R - 96, y + 8 + enH), Theme::Text);
+    Text(L"الترجمة:", g_fSmall.Get(), Rect(R - 90, arTop + 2, R - 12, arTop + 22), Theme::SubText);
+    Text(ar, g_fBody.Get(), Rect(L + 12, arTop, R - 96, arTop + arH), Theme::Green);
+    Text(info, g_fSmall.Get(), Rect(L + 12, infoTop, R - 12, infoTop + infoH), infoColor);
+    y = live.bottom + 8;
     if (st.running && !st.ocrReady)
     {
         Text(L"قارئ النصوص غير متاح في ويندوز", g_fSmall.Get(), Rect(L, y, R, y + 20), Theme::Red);
