@@ -457,7 +457,10 @@ namespace
             if (std::iswalnum(c)) { if (space && !k.empty()) k += L' '; k += (wchar_t)std::towlower(c); space = false; }
             else space = true;
         }
-        return std::to_wstring((int)p.engine) + L"|" + std::to_wstring((int)p.dialect) + L"|" + k;
+        // "v2": اسم المتكلّم صار ينفصل عن الجملة ، والطلب صار أدق: الترجمات القديمة ما منعيد استعمالها
+        // ("s:" = في اسم متكلّم ، لحتى ما تختلط مع نفس الجملة بلا اسم)
+        const bool speaker = !en.empty() && en[0] == L'[';
+        return L"v2|" + std::to_wstring((int)p.engine) + L"|" + std::to_wstring((int)p.dialect) + L"|" + (speaker ? L"s:" : L"") + k;
     }
 
     // قديش الجملتين متشابهين (القارئ أحياناً بيغلط بحرف)
@@ -525,13 +528,18 @@ namespace
         }
     }
 
-    std::wstring SystemPrompt(const TranslateProfile& p, const std::vector<std::pair<std::wstring, std::wstring>>& context)
+    std::wstring SystemPrompt(const TranslateProfile& p, const std::vector<std::pair<std::wstring, std::wstring>>& context,
+                              const std::wstring& speaker)
     {
         std::wstring s =
             L"You translate English video game subtitles into Arabic for a live stream.\n"
             L"Rules:\n"
             L"- Reply with ONLY the Arabic translation. No quotes, notes, or explanations.\n"
             L"- Use " + std::wstring(DialectPrompt(p.dialect)) + L".\n"
+            L"- Translate the meaning like a professional Arabic subtitler, not word for word. "
+            L"Idioms and casual questions must sound like something an Arab would really say "
+            L"(e.g. \"Going out, are you?\" means \"Are you heading out?\").\n"
+            L"- Spell every Arabic word correctly and double-check the wording before replying.\n"
             L"- Keep it short and natural like real subtitles, and keep the tone (jokes, slang, anger).\n"
             L"- The text was read by OCR from the screen and may contain small mistakes; fix them from context.\n"
             L"- If the text is not a sentence (a button, a number, random letters), reply with it unchanged.\n";
@@ -545,6 +553,11 @@ namespace
             for (const GlossaryItem& g : p.glossary)
                 s += L"  " + g.en + L" -> " + (g.ar.empty() ? g.en + L" (keep in English letters)" : g.ar) + L"\n";
         }
+        if (!speaker.empty())
+            s += L"- This line is spoken by the character \"" + speaker + L"\". The name is only a speaker label shown "
+                 L"above the subtitle, NOT part of the sentence: never treat it as someone being addressed. "
+                 L"Start your reply with the speaker's name in Arabic letters (use the names list above if it is there), "
+                 L"then \": \" and then the translation.\n";
         if (!context.empty())
         {
             s += L"Previous lines (for context only, do not translate again):\n";
@@ -611,9 +624,9 @@ namespace
     // =========================================================
     //  3) الاتصال بخدمة الترجمة
     // =========================================================
-    bool CallEngine(const TranslateProfile& p, EngineConfig cfg, const std::wstring& english,
-                    const std::vector<std::pair<std::wstring, std::wstring>>& context,
-                    std::wstring& arabic, std::wstring& error, bool* rateLimited)
+    bool CallEngineRaw(const TranslateProfile& p, EngineConfig cfg, const std::wstring& english,
+                       const std::vector<std::pair<std::wstring, std::wstring>>& context, const std::wstring& speaker,
+                       std::wstring& arabic, std::wstring& error, bool* rateLimited)
     {
         if (rateLimited) *rateLimited = false;
         const TransEngine e = p.engine;
@@ -623,7 +636,7 @@ namespace
             error = L"أدخل مفتاح الخدمة أولًا";
             return false;
         }
-        const std::wstring sys = SystemPrompt(p, context);
+        const std::wstring sys = SystemPrompt(p, context, speaker);
         const std::string  jsys = JsonQuote(sys), juser = JsonQuote(english);
         std::wstring url;
         std::vector<std::wstring> headers = { L"Content-Type: application/json; charset=utf-8" };
@@ -637,18 +650,21 @@ namespace
             headers.push_back(L"x-goog-api-key: " + cfg.key);
             // التفكير بيبطّئ الترجمة: منقلّله لأدنى حد حسب جيل النموذج
             //  - 2.x flash: thinkingBudget = 0 (بلا تفكير)
-            //  - 3.x وأحدث: thinkingLevel (flash-lite أصلاً أدنى حد ، الباقي "low")
+            //  - 3.x وأحدث: thinkingLevel (flash-lite أصلاً أدنى حد ، الباقي "minimal" أو "low")
             const bool flash = cfg.model.find(L"flash") != std::wstring::npos;
             const bool old   = cfg.model.find(L"gemini-1") != std::wstring::npos ||
                                cfg.model.find(L"gemini-2") != std::wstring::npos;
             const bool lite  = cfg.model.find(L"lite") != std::wstring::npos;
+            // "minimal" (الأسرع) موجود لحد 3.6 ، الأحدث أقل شي "low"
+            const bool minimalOk = cfg.model.find(L"3.8") == std::wstring::npos && cfg.model.find(L"gemini-4") == std::wstring::npos;
             std::string gen;
             if (old)
                 gen = "\"temperature\":0.3,\"maxOutputTokens\":400" +
                       std::string(flash ? ",\"thinkingConfig\":{\"thinkingBudget\":0}" : "");
             else    // النماذج الجديدة: الحرارة الافتراضية ، ومساحة أكبر لأن التفكير بيحسب من الحد
                 gen = "\"maxOutputTokens\":2048" +
-                      std::string(flash && !lite ? ",\"thinkingConfig\":{\"thinkingLevel\":\"low\"}" : "");
+                      std::string(flash && !lite ? (minimalOk ? ",\"thinkingConfig\":{\"thinkingLevel\":\"minimal\"}"
+                                                              : ",\"thinkingConfig\":{\"thinkingLevel\":\"low\"}") : "");
             body = "{\"systemInstruction\":{\"parts\":[{\"text\":" + jsys + "}]},"
                    "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":" + juser + "}]}],"
                    "\"generationConfig\":{" + gen + "}}";
@@ -739,6 +755,48 @@ namespace
             error = L"الخدمة أرجعت ترجمة فارغة";
             return false;
         }
+        return true;
+    }
+}
+
+namespace
+{
+    // القارئ بيحط اسم المتكلّم بأول الجملة بهالشكل: "[Joshua] Going out, are you?"
+    bool SplitSpeaker(const std::wstring& text, std::wstring& speaker, std::wstring& line)
+    {
+        if (text.size() < 4 || text[0] != L'[')
+            return false;
+        const size_t close = text.find(L"] ");
+        if (close == std::wstring::npos || close < 2 || close > 40)
+            return false;
+        speaker = text.substr(1, close - 1);
+        line    = text.substr(close + 2);
+        return !line.empty();
+    }
+
+    std::wstring GlossaryArabic(const TranslateProfile& p, const std::wstring& en)
+    {
+        for (const GlossaryItem& g : p.glossary)
+            if (_wcsicmp(g.en.c_str(), en.c_str()) == 0)
+                return g.ar.empty() ? g.en : g.ar;
+        return L"";
+    }
+
+    // اسم المتكلّم ما بيتترجم مع الجملة (كان الذكاء الصناعي يفكّره عم ينحكى معه: "يا جوشوا")
+    bool CallEngine(const TranslateProfile& p, const EngineConfig& cfg, const std::wstring& english,
+                    const std::vector<std::pair<std::wstring, std::wstring>>& context,
+                    std::wstring& arabic, std::wstring& error, bool* rateLimited)
+    {
+        std::wstring speaker, line;
+        if (!SplitSpeaker(english, speaker, line))
+            return CallEngineRaw(p, cfg, english, context, L"", arabic, error, rateLimited);
+        if (EngineIsAi(p.engine))       // بيكتب الاسم بالعربي لحاله ("جوشوا: ...")
+            return CallEngineRaw(p, cfg, line, context, speaker, arabic, error, rateLimited);
+        // الترجمة الآلية: الجملة لحالها ، والاسم من "الأسماء والمصطلحات" (أو متل ما هو)
+        if (!CallEngineRaw(p, cfg, line, context, L"", arabic, error, rateLimited))
+            return false;
+        const std::wstring name = GlossaryArabic(p, speaker);
+        arabic = (name.empty() ? speaker : name) + L": " + arabic;
         return true;
     }
 }
@@ -834,6 +892,29 @@ namespace
         DeleteDC(mem);
         ReleaseDC(nullptr, screen);
         return ok;
+    }
+
+    // سطر لحاله بيشبه اسم شخصية: كلمة لـ 3 كلمات ، كل وحدة بتبلّش بحرف كبير ، بلا علامات جملة
+    bool LooksLikeSpeaker(const std::wstring& l)
+    {
+        if (l.size() < 2 || l.size() > 28)
+            return false;
+        int words = 0;
+        bool start = true;
+        for (wchar_t c : l)
+        {
+            if (c == L' ') { start = true; continue; }
+            if (wcschr(L".,!?;:\"()[]…", c) || std::iswdigit(c))
+                return false;
+            if (start)
+            {
+                if (!std::iswupper(c))
+                    return false;
+                ++words;
+                start = false;
+            }
+        }
+        return words >= 1 && words <= 3;
     }
 
     class Session : public std::enable_shared_from_this<Session>
@@ -1050,13 +1131,23 @@ namespace
                     std::wstring text;
                     if (ocr.Ready() && ocr.Read(src, ow, oh, ow * 4, lines))
                     {
+                        std::vector<std::wstring> clean;
                         for (std::wstring& l : lines)
                         {
                             l = Trim(l);
                             while (!l.empty() && (l[0] == L'-' || l[0] == L'|' || l[0] == L'—')) l = Trim(l.substr(1));
                             if (!l.empty())
-                                text += (text.empty() ? L"" : L" ") + l;
+                                clean.push_back(l);
                         }
+                        // السطر الأول اسم لحاله (متل "Joshua" فوق الجملة)؟ منعلّم عليه إنه اسم المتكلّم
+                        size_t first = 0;
+                        if (clean.size() >= 2 && LooksLikeSpeaker(clean[0]))
+                        {
+                            text = L"[" + clean[0] + L"]";
+                            first = 1;
+                        }
+                        for (size_t i = first; i < clean.size(); ++i)
+                            text += (text.empty() ? L"" : L" ") + clean[i];
                     }
                     OnReading(Letters(text) >= 3 ? text : std::wstring(), tick, prevTick);
                     prevTick = tick;
