@@ -84,8 +84,13 @@ namespace
     }
 
     // مكان الترجمة على الشاشة (بكسل حقيقي)
-    RECT TargetRect(const TranslateProfile& p)
+    RECT TargetRect(const TranslateProfile& p, PlayerOverlayPlacement placement)
     {
+        double rx = p.rx, ry = p.ry, rw = p.rw, rh = p.rh;
+        if (placement && !placement(p, rx, ry, rw, rh))
+        {
+            rx = p.rx; ry = p.ry; rw = p.rw; rh = p.rh;
+        }
         RECT m = p.fromScreen ? p.monitor : p.overlayMonitor;
         if (m.right - m.left < 16 || m.bottom - m.top < 16)
         {
@@ -95,10 +100,10 @@ namespace
         }
         const double mw = m.right - m.left, mh = m.bottom - m.top;
         RECT r{};
-        r.left   = m.left + (LONG)std::lround(p.rx * mw);
-        r.top    = m.top + (LONG)std::lround(p.ry * mh);
-        r.right  = r.left + std::max<LONG>(16, (LONG)std::lround(p.rw * mw));
-        r.bottom = r.top + std::max<LONG>(16, (LONG)std::lround(p.rh * mh));
+        r.left   = m.left + (LONG)std::lround(rx * mw);
+        r.top    = m.top + (LONG)std::lround(ry * mh);
+        r.right  = r.left + std::max<LONG>(16, (LONG)std::lround(rw * mw));
+        r.bottom = r.top + std::max<LONG>(16, (LONG)std::lround(rh * mh));
         return r;
     }
 
@@ -133,7 +138,7 @@ namespace
     }
 }
 
-void UpdatePlayerOverlays()
+void UpdatePlayerOverlays(PlayerOverlayPlacement placement)
 {
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastUpdate < 66)
@@ -178,7 +183,7 @@ void UpdatePlayerOverlays()
         if (!w.hwnd && !(w.hwnd = CreateOverlay()))
             return;                // ويندوز ما بيدعم الإخفاء عن التصوير
 
-        const RECT r = TargetRect(p);
+        const RECT r = TargetRect(p, placement);
         std::shared_ptr<const MediaFrame> f = RenderTranslationBox(arabic, r.right - r.left, r.bottom - r.top, p, false);
         if (!f || f->width < 1 || f->height < 1)
             continue;

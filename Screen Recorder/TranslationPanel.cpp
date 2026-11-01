@@ -488,7 +488,7 @@ float TranslationPanel::DrawPlayer(float y, float L, float R)
     Text(L"٧. الترجمة على شاشتك", g_fBody.Get(), Rect(L, y, R, y + 26), Theme::Text);
     y += 30;
     y = ToggleRow(y, L, R, L"إظهار الترجمة العربية فوق اللعبة على شاشتي",
-                  L"لا تظهر في البث ولا في التسجيل  •  تبقى تعمل ما دام الخيار مفعّلًا ولو أغلقت هذه النافذة",
+                  L"بالمكان والحجم نفسيهما كما يراها المشاهدون  •  لا تظهر في البث ولا في التسجيل",
                   m_p.playerOverlay, ID_PLAYER_OVERLAY);
     if (!m_p.playerOverlay)
         return y + 6;
@@ -523,12 +523,15 @@ float TranslationPanel::DrawPlayer(float y, float L, float R)
             x -= w + 6;
         }
         y += 42;
-        Text(L"تظهر في المكان نفسه الذي حدّدته على الصورة، فاعرض صورة اللعبة على هذه الشاشة بملء الشاشة",
+        Text(L"اعرض صورة اللعبة على هذه الشاشة بملء الشاشة لتطابق الترجمة مكانها",
              g_fSmall.Get(), Rect(L, y - 4, R, y + 16), Theme::SubText);
         y += 22;
     }
     Text(L"شغّل اللعبة بوضع «ملء الشاشة بلا حدود» (Borderless) لتظهر الترجمة فوقها",
          g_fSmall.Get(), Rect(L, y - 4, R, y + 16), Theme::Yellow);
+    y += 20;
+    Text(L"تحريك طبقة الترجمة في المعاينة يحرّكها على شاشتك أيضًا  •  تبقى تعمل ولو أغلقت هذه النافذة",
+         g_fSmall.Get(), Rect(L, y - 4, R, y + 16), Theme::SubText);
     y += 20;
     Text(L"يمكنك إظهارها وإخفاؤها باختصار من نافذة «اختصارات لوحة المفاتيح»",
          g_fSmall.Get(), Rect(L, y - 4, R, y + 16), Theme::SubText);
@@ -555,7 +558,16 @@ void TranslationPanel::DrawBody(float L, float top, float R)
 {
     ++m_frame;
     if (!(GetAsyncKeyState(VK_LBUTTON) & 0x8000))
+    {
+        // خلص السحب: طبقة البث بتنتقل للمكان الجديد (والترجمة على شاشتك بتتبعها)
+        if (m_dragging && m_dragMoved && !m_addMode && m_h.fitLayer)
+        {
+            Apply(true);
+            m_h.fitLayer(m_id);
+        }
         m_dragging = false;
+        m_dragMoved = false;
+    }
     if (!Load())                         // انحذف من مكان تاني؟
     {
         m_all = TranslateProfiles();
@@ -615,6 +627,7 @@ bool TranslationPanel::OnDrag(int id, D2D1_POINT_2F p)
     m_p.ry = (y0 - m_imgDst.top) / ih;
     m_p.rw = std::max(0.02, (double)(x1 - x0) / iw);
     m_p.rh = std::max(0.02, (double)(y1 - y0) / ih);
+    m_dragMoved = true;
     Apply(false);
     return true;
 }

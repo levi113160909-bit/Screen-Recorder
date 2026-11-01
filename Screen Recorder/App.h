@@ -459,6 +459,8 @@ void AddTranslationLayer(const std::wstring& profileId);
 void FitTranslationLayers(const std::wstring& profileId);
 void OpenTranslationPanel(int layerId);
 void ToggleTranslationOverlay();     // الاختصار: الترجمة فوق اللعبة على شاشتك (تشغيل/إيقاف)
+// مكان طبقة الترجمة بالمشهد ، كنسبة من صورة المصدر (للترجمة على شاشتك: نفس مكان البث)
+bool TranslationLayerRegion(const TranslateProfile& p, double& rx, double& ry, double& rw, double& rh);
 void UpdateMediaDelays();
 
 // ---- AppTray.cpp: أيقونة جنب الساعة: الإخفاء والإظهار، قائمتها، والخروج ----

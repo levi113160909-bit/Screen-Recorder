@@ -83,6 +83,7 @@ private:
     int                            m_bmpW = 0, m_bmpH = 0;
     D2D1_RECT_F                    m_imgDst{};
     bool                           m_dragging = false;
+    bool                           m_dragMoved = false;     // السحب غيّر المكان (لما يخلص: منحرّك طبقة البث)
     D2D1_POINT_2F                  m_anchor{};
 
     std::shared_ptr<TestState>     m_test;

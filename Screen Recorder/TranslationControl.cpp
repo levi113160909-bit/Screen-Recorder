@@ -227,3 +227,36 @@ void ToggleTranslationOverlay()
         }
     Notify(Glyph::Game, Theme::Green, L"الترجمة تظهر على شاشتك", L"«" + name + L"» • لا تظهر في البث");
 }
+
+// العكس تبع MapRegion: طبقة الترجمة بالمشهد -> نسبة من صورة المصدر
+// (فالترجمة على شاشتك بتطلع بنفس مكان وحجم اللي بيشوفه الجمهور)
+bool TranslationLayerRegion(const TranslateProfile& p, double& rx, double& ry, double& rw, double& rh)
+{
+    std::lock_guard<std::mutex> lock(g_scene.mutex);
+    const SceneLayer* t = nullptr;
+    for (const SceneLayer& l : g_scene.layers)
+        if (l.kind == LayerKind::Translation && l.source == p.id && l.visible) { t = &l; break; }
+    if (!t || t->w < 4 || t->h < 4)
+        return false;
+    for (const SceneLayer& l : g_scene.layers)
+    {
+        const bool match = p.fromScreen ? (l.kind == LayerKind::Capture && l.target.isMonitor && EqualRect(&l.target.rect, &p.monitor))
+                                        : ((l.kind == LayerKind::Device || l.kind == LayerKind::Camera) && l.source == p.deviceLink);
+        if (!match || l.w < 4 || l.h < 4)
+            continue;
+        const double vw = std::max(0.05, 1 - l.cropL - l.cropR), vh = std::max(0.05, 1 - l.cropT - l.cropB);
+        rx = l.cropL + (t->x - l.x) / l.w * vw;
+        ry = l.cropT + (t->y - l.y) / l.h * vh;
+        rw = t->w / l.w * vw;
+        rh = t->h / l.h * vh;
+        return rw > 0.005 && rh > 0.005;
+    }
+    // ما في طبقة للمصدر: الطبقة كنسبة من الإطار (متل Place)
+    if (g_scene.canvasW < 16 || g_scene.canvasH < 16)
+        return false;
+    rx = t->x / g_scene.canvasW;
+    ry = t->y / g_scene.canvasH;
+    rw = t->w / g_scene.canvasW;
+    rh = t->h / g_scene.canvasH;
+    return true;
+}
