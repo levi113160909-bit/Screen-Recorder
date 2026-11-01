@@ -111,7 +111,7 @@ std::wstring EngineDefaultModel(TransEngine e)
 {
     switch (e)
     {
-    case TransEngine::Gemini: return L"gemini-2.5-flash";
+    case TransEngine::Gemini: return L"gemini-3.5-flash-lite";    // الأسرع ، ومتاح بالمجاني
     case TransEngine::Claude: return L"claude-haiku-5-5";
     case TransEngine::OpenAI: return L"gpt-4.1-mini";
     case TransEngine::Ollama: return L"aya-expanse:8b";
@@ -628,11 +628,23 @@ namespace
         {
             url = L"https://generativelanguage.googleapis.com/v1beta/models/" + UrlEncode(cfg.model) + L":generateContent";
             headers.push_back(L"x-goog-api-key: " + cfg.key);
+            // التفكير بيبطّئ الترجمة: منقلّله لأدنى حد حسب جيل النموذج
+            //  - 2.x flash: thinkingBudget = 0 (بلا تفكير)
+            //  - 3.x وأحدث: thinkingLevel (flash-lite أصلاً أدنى حد ، الباقي "low")
             const bool flash = cfg.model.find(L"flash") != std::wstring::npos;
+            const bool old   = cfg.model.find(L"gemini-1") != std::wstring::npos ||
+                               cfg.model.find(L"gemini-2") != std::wstring::npos;
+            const bool lite  = cfg.model.find(L"lite") != std::wstring::npos;
+            std::string gen;
+            if (old)
+                gen = "\"temperature\":0.3,\"maxOutputTokens\":400" +
+                      std::string(flash ? ",\"thinkingConfig\":{\"thinkingBudget\":0}" : "");
+            else    // النماذج الجديدة: الحرارة الافتراضية ، ومساحة أكبر لأن التفكير بيحسب من الحد
+                gen = "\"maxOutputTokens\":2048" +
+                      std::string(flash && !lite ? ",\"thinkingConfig\":{\"thinkingLevel\":\"low\"}" : "");
             body = "{\"systemInstruction\":{\"parts\":[{\"text\":" + jsys + "}]},"
                    "\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":" + juser + "}]}],"
-                   "\"generationConfig\":{\"temperature\":0.3,\"maxOutputTokens\":400" +
-                   std::string(flash ? ",\"thinkingConfig\":{\"thinkingBudget\":0}" : "") + "}}";
+                   "\"generationConfig\":{" + gen + "}}";
             break;
         }
         case TransEngine::Claude:
@@ -699,7 +711,8 @@ namespace
         {
         case TransEngine::Gemini:
             for (size_t i = 0; i < v["candidates"][0]["content"]["parts"].Size(); ++i)
-                text += v["candidates"][0]["content"]["parts"][i]["text"].Str();
+                if (!v["candidates"][0]["content"]["parts"][i]["thought"].boolean)   // منتجاهل "التفكير"
+                    text += v["candidates"][0]["content"]["parts"][i]["text"].Str();
             break;
         case TransEngine::Claude:
             for (size_t i = 0; i < v["content"].Size(); ++i)
