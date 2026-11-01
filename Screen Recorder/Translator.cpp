@@ -252,14 +252,16 @@ namespace
                      CleanField(g_engines[e].model).c_str(), CleanField(g_engines[e].extra).c_str());
         for (const TranslateProfile& p : g_profiles)
         {
-            fwprintf(f, L"P\t%ls\t%ls\t%d\t%ls\t%ls\t%ld\t%ld\t%ld\t%ld\t%ls\t%ls\t%ls\t%ls\t%d\t%d\t%ls\t%d\t%d\t%d\t%d\t%ls\t%ls\t%d\n",
+            fwprintf(f, L"P\t%ls\t%ls\t%d\t%ls\t%ls\t%ld\t%ld\t%ld\t%ld\t%ls\t%ls\t%ls\t%ls\t%d\t%d\t%ls\t%d\t%d\t%d\t%d\t%ls\t%ls\t%d\t%d\t%ld\t%ld\t%ld\t%ld\n",
                      CleanField(p.id).c_str(), CleanField(p.name).c_str(), p.fromScreen ? 1 : 0,
                      CleanField(p.deviceLink).c_str(), CleanField(p.deviceName).c_str(),
                      p.monitor.left, p.monitor.top, p.monitor.right, p.monitor.bottom,
                      Num(p.rx).c_str(), Num(p.ry).c_str(), Num(p.rw).c_str(), Num(p.rh).c_str(),
                      (int)p.engine, (int)p.dialect, CleanField(p.game).c_str(), p.soften ? 1 : 0,
                      p.delayMs, p.delayAll ? 1 : 0, p.threshold,
-                     Num(p.fontScale).c_str(), Num(p.boxOpacity).c_str(), p.colorIndex);
+                     Num(p.fontScale).c_str(), Num(p.boxOpacity).c_str(), p.colorIndex,
+                     p.playerOverlay ? 1 : 0, p.overlayMonitor.left, p.overlayMonitor.top,
+                     p.overlayMonitor.right, p.overlayMonitor.bottom);
             for (const GlossaryItem& g : p.glossary)
                 fwprintf(f, L"G\t%ls\t%ls\t%ls\n", CleanField(p.id).c_str(), CleanField(g.en).c_str(), CleanField(g.ar).c_str());
         }
@@ -318,6 +320,11 @@ namespace
                 t.fontScale  = std::clamp((float)_wtof(p[21].c_str()), 0.5f, 2.0f);
                 t.boxOpacity = std::clamp((float)_wtof(p[22].c_str()), 0.0f, 1.0f);
                 t.colorIndex = std::clamp(_wtoi(p[23].c_str()), 0, TRANS_COLOR_COUNT - 1);
+                if (p.size() >= 29)          // الترجمة فوق اللعبة (الملفات الأقدم ما فيها)
+                {
+                    t.playerOverlay  = p[24] == L"1";
+                    t.overlayMonitor = { _wtol(p[25].c_str()), _wtol(p[26].c_str()), _wtol(p[27].c_str()), _wtol(p[28].c_str()) };
+                }
                 if (!t.id.empty())
                     g_profiles.push_back(t);
             }
@@ -781,13 +788,17 @@ namespace
         bool         requested = false, done = false, failed = false, inflight = false;
     };
 
-    // صورة جزء من الشاشة (لألعاب الكمبيوتر)
-    bool GrabScreen(const RECT& r, std::vector<uint8_t>& out, int& w, int& h)
+    // صورة جزء من الشاشة (لألعاب الكمبيوتر). maxW > 0: مصغّرة لهالعرض (للمعاينة)
+    // بلا CAPTUREBLT: هالخيار بيوقّف رسم الشاشة كلها لحظة كل مرة (ثقل ورجفة بالماوس واللعبة)،
+    // وويندوز 8 وطالع أصلاً بيعطينا الصورة كاملة بدونه
+    bool GrabScreen(const RECT& r, std::vector<uint8_t>& out, int& w, int& h, int maxW = 0)
     {
-        w = r.right - r.left;
-        h = r.bottom - r.top;
-        if (w < 8 || h < 8)
+        const int sw = r.right - r.left, sh = r.bottom - r.top;
+        if (sw < 8 || sh < 8)
             return false;
+        const int scale = maxW > 0 ? std::max(1, (sw + maxW - 1) / maxW) : 1;
+        w = sw / scale;
+        h = sh / scale;
         HDC screen = GetDC(nullptr);
         HDC mem = CreateCompatibleDC(screen);
         BITMAPINFO bmi{};
@@ -803,7 +814,14 @@ namespace
         if (dib)
         {
             HGDIOBJ old = SelectObject(mem, dib);
-            ok = BitBlt(mem, 0, 0, w, h, screen, r.left, r.top, SRCCOPY | CAPTUREBLT) != FALSE;
+            if (scale == 1)
+                ok = BitBlt(mem, 0, 0, w, h, screen, r.left, r.top, SRCCOPY) != FALSE;
+            else
+            {
+                SetStretchBltMode(mem, HALFTONE);
+                SetBrushOrgEx(mem, 0, 0, nullptr);
+                ok = StretchBlt(mem, 0, 0, w, h, screen, r.left, r.top, sw, sh, SRCCOPY) != FALSE;
+            }
             GdiFlush();
             if (ok)
             {
@@ -1237,6 +1255,51 @@ namespace
     }
 }
 
+// -------------------------------------------------------------
+//  معاينة الشاشة للنافذة: خيط بالخلفية بيصوّرها كذا مرة بالثانية (مصغّرة)
+//  (قبل: كانت تنصوّر الشاشة كلها مع كل رسمة للنافذة ، على خيط الواجهة ، فتصير النافذة تقيلة)
+// -------------------------------------------------------------
+namespace
+{
+    std::mutex                        g_prevMx;
+    RECT                              g_prevRect{};
+    std::shared_ptr<const MediaFrame> g_prevFrame;
+    std::atomic<ULONGLONG>            g_prevWanted{ 0 };
+    std::atomic<bool>                 g_prevRunning{ false };
+
+    void PreviewLoop()
+    {
+        std::vector<uint8_t> px;
+        while (!g_shutdown && Now() - g_prevWanted < 2000)      // ما حدا طلبها من ثانيتين: منوقّف
+        {
+            RECT r;
+            {
+                std::lock_guard<std::mutex> lock(g_prevMx);
+                r = g_prevRect;
+            }
+            int w = 0, h = 0;
+            if (GrabScreen(r, px, w, h, 1280))
+            {
+                auto f = std::make_shared<MediaFrame>();
+                f->width   = w;
+                f->height  = h;
+                f->tick    = Now();
+                f->pixels  = std::move(px);
+                f->version = ++g_frameVersion;
+                std::lock_guard<std::mutex> lock(g_prevMx);
+                if (EqualRect(&r, &g_prevRect))                  // الشاشة ما تغيّرت بالنص
+                    g_prevFrame = f;
+            }
+            px = {};
+            Sleep(125);                                           // 8 مرات بالثانية بتكفي للمعاينة
+        }
+        g_prevRunning = false;
+        // انطلبت بآخر لحظة؟ منرجع منشغّل
+        if (!g_shutdown && Now() - g_prevWanted < 2000 && !g_prevRunning.exchange(true))
+            std::thread(PreviewLoop).detach();
+    }
+}
+
 TranslateStatus GetTranslateStatus(const std::wstring& profileId)
 {
     std::shared_ptr<Session> s;
@@ -1288,22 +1351,33 @@ std::shared_ptr<const MediaFrame> TranslateSourceFrame(const TranslateProfile& p
 {
     if (!p.fromScreen)
         return PeekDeviceFrame(p.deviceLink);
-    // الشاشة كلها (مصغّرة) لحتى تحدّد عليها
-    std::vector<uint8_t> px;
-    int w = 0, h = 0;
-    if (!GrabScreen(p.monitor, px, w, h))
+    if (g_shutdown)
         return nullptr;
-    const int scale = std::max(1, (w + 1279) / 1280);
-    auto f = std::make_shared<MediaFrame>();
-    f->width  = w / scale;
-    f->height = h / scale;
-    f->tick   = Now();
-    f->pixels.resize((size_t)f->width * f->height * 4);
-    for (int y = 0; y < f->height; ++y)
-        for (int x = 0; x < f->width; ++x)
-            memcpy(f->pixels.data() + ((size_t)y * f->width + x) * 4, px.data() + ((size_t)y * scale * w + x * scale) * 4, 4);
-    f->version = ++g_frameVersion;
+    // الشاشة: آخر صورة صوّرها خيط المعاينة (والطلب بيخلّيه شغّال)
+    g_prevWanted = Now();
+    std::shared_ptr<const MediaFrame> f;
+    {
+        std::lock_guard<std::mutex> lock(g_prevMx);
+        if (!EqualRect(&g_prevRect, &p.monitor))                 // شاشة تانية: الصورة القديمة ما بتنفع
+        {
+            g_prevRect = p.monitor;
+            g_prevFrame.reset();
+        }
+        f = g_prevFrame;
+    }
+    if (!g_prevRunning.exchange(true))
+        std::thread(PreviewLoop).detach();
     return f;
+}
+
+bool TranslateLiveLine(const std::wstring& profileId, std::wstring& arabic)
+{
+    std::shared_ptr<Session> s = GetSession(profileId, true);
+    Event e;
+    if (!s || !s->EventAt(Now(), e) || !e.done || e.ar.empty())
+        return false;
+    arabic = e.ar;
+    return true;
 }
 
 // =============================================================
@@ -1443,10 +1517,17 @@ std::shared_ptr<const MediaFrame> TranslationLayerFrame(const SceneLayer& layer,
     if (text.empty())
         return Transparent();
 
-    const int W = std::clamp((int)std::lround(layer.w), 16, 3840);
-    const int H = std::clamp((int)std::lround(layer.h), 16, 2160);
+    std::shared_ptr<const MediaFrame> f = RenderTranslationBox(text, (int)std::lround(layer.w), (int)std::lround(layer.h), prof, dim);
+    return f ? f : Transparent();
+}
+
+std::shared_ptr<const MediaFrame> RenderTranslationBox(const std::wstring& text, int width, int height,
+                                                       const TranslateProfile& p, bool dim)
+{
+    const int W = std::clamp(width, 16, 3840);
+    const int H = std::clamp(height, 16, 2160);
     wchar_t style[96];
-    swprintf_s(style, L"|%d|%d|%.2f|%.2f|%d|%d", W, H, prof.fontScale, prof.boxOpacity, prof.colorIndex, dim ? 1 : 0);
+    swprintf_s(style, L"|%d|%d|%.2f|%.2f|%d|%d", W, H, p.fontScale, p.boxOpacity, p.colorIndex, dim ? 1 : 0);
     const std::wstring key = text + style;
 
     std::lock_guard<std::mutex> lock(g_renderMx);
@@ -1455,7 +1536,7 @@ std::shared_ptr<const MediaFrame> TranslationLayerFrame(const SceneLayer& layer,
         return it->second;
     if (g_rendered.size() > 24)
         g_rendered.clear();
-    std::shared_ptr<const MediaFrame> f = RenderOverlay(text, W, H, prof, dim);
+    std::shared_ptr<const MediaFrame> f = RenderOverlay(text, W, H, p, dim);
     g_rendered[key] = f;
-    return f ? f : Transparent();
+    return f;
 }

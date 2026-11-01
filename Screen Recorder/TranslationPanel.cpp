@@ -3,6 +3,7 @@
 // =============================================================
 #include "TranslationPanel.h"
 #include "GameOcr.h"
+#include "PlayerOverlay.h"
 #include <algorithm>
 #include <cmath>
 #include <cwctype>
@@ -40,9 +41,11 @@ namespace
         ID_ADD_SCENE     = ID_PANEL_USER + 270,
         ID_FIT,
         ID_CLEAR_CACHE,
+        ID_PLAYER_OVERLAY = ID_PANEL_USER + 280,
+        ID_OVERLAY_MON_FIRST,                      // +281 .. +296
     };
-    constexpr int MAX_PROFILES = 40, MAX_SOURCES = 30, MAX_GLOSSARY = 99;
-    static_assert(ID_CLEAR_CACHE < ID_PANEL_SETTINGS_NAV, "TranslationPanel: الأرقام وصلت لأرقام الإعدادات");
+    constexpr int MAX_PROFILES = 40, MAX_SOURCES = 30, MAX_GLOSSARY = 99, MAX_OVERLAY_SCREENS = 16;
+    static_assert(ID_OVERLAY_MON_FIRST + MAX_OVERLAY_SCREENS < ID_PANEL_SETTINGS_NAV, "TranslationPanel: الأرقام وصلت لأرقام الإعدادات");
 
     std::wstring Seconds(int ms)
     {
@@ -65,6 +68,8 @@ TranslationPanel::TranslationPanel(TranslationPanelHooks hooks, const std::wstri
 {
     if (m_h.devices)
         m_devices = m_h.devices();
+    if (m_h.monitors)
+        m_monitors = m_h.monitors();
     m_all = TranslateProfiles();
     if (m_id.empty() && !m_all.empty())
         m_id = m_all.front().id;
@@ -105,14 +110,10 @@ void TranslationPanel::NewProfile()
         p.deviceLink = m_devices.front().link;
         p.deviceName = m_devices.front().name;
     }
-    else if (m_h.monitors)
+    else if (!m_monitors.empty())
     {
-        const std::vector<CaptureTarget> mons = m_h.monitors();
-        if (!mons.empty())
-        {
-            p.fromScreen = true;
-            p.monitor    = mons.front().rect;
-        }
+        p.fromScreen = true;
+        p.monitor    = m_monitors.front().rect;
     }
     // سياق جاهز للعبة اللي بدك تبثها
     if (m_all.empty())
@@ -459,9 +460,66 @@ float TranslationPanel::DrawLook(float y, float L, float R)
         colors.push_back(TransColorName(i));
     Text(L"لون النص", g_fBody.Get(), Rect(R - 130, y, R, y + 36), Theme::Text);
     DrawSegmented(Rect(L, y, R - 140, y + 36), colors, m_p.colorIndex, ID_COLOR_FIRST, true);
-    y += 48;
+    return y + 48;
+}
 
-    Text(L"٧. قراءة النص", g_fBody.Get(), Rect(L, y, R, y + 26), Theme::Text);
+// ---- الترجمة على شاشتك ----
+float TranslationPanel::DrawPlayer(float y, float L, float R)
+{
+    Text(L"٧. الترجمة على شاشتك", g_fBody.Get(), Rect(L, y, R, y + 26), Theme::Text);
+    y += 30;
+    y = ToggleRow(y, L, R, L"إظهار الترجمة العربية فوق اللعبة على شاشتي",
+                  L"لا تظهر في البث ولا في التسجيل  •  تبقى تعمل ما دام الخيار مفعّلًا ولو أغلقت هذه النافذة",
+                  m_p.playerOverlay, ID_PLAYER_OVERLAY);
+    if (!m_p.playerOverlay)
+        return y + 6;
+
+    if (PlayerOverlayBlocked())
+    {
+        Text(L"نسخة ويندوز لديك لا تسمح بإخفاء الترجمة عن التصوير، حدّث ويندوز 10 إلى الإصدار 2004 أو أحدث",
+             g_fSmall.Get(), Rect(L, y, R, y + 20), Theme::Red);
+        y += 26;
+    }
+    if (!m_p.fromScreen && !m_monitors.empty())
+    {
+        // جهاز الالتقاط: صورة اللعبة على أي شاشة؟ (مثلاً برنامج الكرت بملء الشاشة)
+        Text(L"الشاشة التي تعرض صورة اللعبة:", g_fBody.Get(), Rect(R - 260, y, R, y + 36), Theme::Text);
+        float x = R - 270;
+        bool any = false;
+        for (const CaptureTarget& t : m_monitors)
+            any = any || EqualRect(&t.rect, &m_p.overlayMonitor);
+        for (int i = 0; i < (int)m_monitors.size() && i < MAX_OVERLAY_SCREENS; ++i)
+        {
+            const CaptureTarget& t = m_monitors[i];
+            const std::wstring label = LtrText(std::to_wstring(i + 1)) + (t.isPrimary ? L" (الرئيسية)" : L"");
+            const float w = TextWidth(label, g_fSegment.Get()) + 30;
+            if (x - w < L)
+                break;
+            const D2D1_RECT_F c = Rect(x - w, y + 1, x, y + 35);
+            const bool sel = any ? EqualRect(&t.rect, &m_p.overlayMonitor) != FALSE : t.isPrimary;
+            const bool hover = AddHit(c, ID_OVERLAY_MON_FIRST + i);
+            Fill(c, sel ? WithAlpha(Theme::Accent, 0.22f) : (hover ? Theme::Hover : Theme::Card), 9);
+            Stroke(c, sel ? Theme::Accent : Theme::Border, 9);
+            Text(label, g_fSegment.Get(), Rect(c.left + 6, c.top, c.right - 6, c.bottom), sel ? Theme::Text : Theme::SubText);
+            x -= w + 6;
+        }
+        y += 42;
+        Text(L"تظهر في المكان نفسه الذي حدّدته على الصورة، فاعرض صورة اللعبة على هذه الشاشة بملء الشاشة",
+             g_fSmall.Get(), Rect(L, y - 4, R, y + 16), Theme::SubText);
+        y += 22;
+    }
+    Text(L"شغّل اللعبة بوضع «ملء الشاشة بلا حدود» (Borderless) لتظهر الترجمة فوقها",
+         g_fSmall.Get(), Rect(L, y - 4, R, y + 16), Theme::Yellow);
+    y += 20;
+    Text(L"يمكنك إظهارها وإخفاؤها باختصار من نافذة «اختصارات لوحة المفاتيح»",
+         g_fSmall.Get(), Rect(L, y - 4, R, y + 16), Theme::SubText);
+    return y + 26;
+}
+
+// ---- قراءة النص ----
+float TranslationPanel::DrawReading(float y, float L, float R)
+{
+    Text(L"٨. قراءة النص", g_fBody.Get(), Rect(L, y, R, y + 26), Theme::Text);
     y += 30;
     y = ToggleRow(y, L, R, L"فصل النص الفاتح عن الخلفية", L"جرّبه إذا كانت القراءة غير دقيقة فوق خلفيات مزدحمة",
                   m_p.threshold > 0, ID_THRESHOLD_ON);
@@ -497,6 +555,8 @@ void TranslationPanel::DrawBody(float L, float top, float R)
     y = DrawGlossary(y + 6, L, R);
     y = DrawSync(y + 6, L, R);
     y = DrawLook(y + 6, L, R);
+    y = DrawPlayer(y + 6, L, R);
+    y = DrawReading(y + 6, L, R);
 
     // ---- الأزرار ----
     Fill(Rect(L, y, R, y + 1), Theme::Border);
@@ -624,6 +684,16 @@ void TranslationPanel::OnClick(int id)
         Apply(true);
         return;
     }
+    if (id >= ID_OVERLAY_MON_FIRST && id < ID_OVERLAY_MON_FIRST + MAX_OVERLAY_SCREENS)
+    {
+        const int i = id - ID_OVERLAY_MON_FIRST;
+        if (i < (int)m_monitors.size())
+        {
+            m_p.overlayMonitor = m_monitors[i].rect;
+            Apply(true);
+        }
+        return;
+    }
     if (id >= ID_GLOSS_DEL && id < ID_GLOSS_DEL + MAX_GLOSSARY)
     {
         const int i = id - ID_GLOSS_DEL;
@@ -666,7 +736,9 @@ void TranslationPanel::OnClick(int id)
         return;
     case ID_SOURCE_SCREEN:
     {
-        std::vector<CaptureTarget> mons = m_h.monitors ? m_h.monitors() : std::vector<CaptureTarget>{};
+        if (m_h.monitors)
+            m_monitors = m_h.monitors();           // يمكن وصّلت شاشة جديدة
+        const std::vector<CaptureTarget>& mons = m_monitors;
         if (mons.empty())
             return;
         int pick = 0;
@@ -747,6 +819,7 @@ void TranslationPanel::OnClick(int id)
     }
     case ID_SOFTEN:    m_p.soften = !m_p.soften; Apply(true); return;
     case ID_DELAY_ALL: m_p.delayAll = !m_p.delayAll; Apply(true); return;
+    case ID_PLAYER_OVERLAY: m_p.playerOverlay = !m_p.playerOverlay; Apply(true); return;
     case ID_THRESHOLD_ON:
         m_p.threshold = m_p.threshold > 0 ? 0 : 180;
         Apply(true);

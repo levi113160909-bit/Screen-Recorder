@@ -193,6 +193,7 @@
     <ClCompile Include="GameOcr.cpp" />
     <ClCompile Include="Translator.cpp" />
     <ClCompile Include="TranslationPanel.cpp" />
+    <ClCompile Include="PlayerOverlay.cpp" />
     <ClCompile Include="DeviceControl.cpp" />
     <ClCompile Include="TranslationControl.cpp" />
     <ClCompile Include="RegionSelect.cpp" />
@@ -269,6 +270,7 @@
     <ClInclude Include="GameOcr.h" />
     <ClInclude Include="Translator.h" />
     <ClInclude Include="TranslationPanel.h" />
+    <ClInclude Include="PlayerOverlay.h" />
     <ClInclude Include="RegionSelect.h" />
     <ClInclude Include="Updater.h" />
     <ClInclude Include="Screenshot.h" />

@@ -181,3 +181,49 @@ void UpdateMediaDelays()
     g_systemAudio.SetDelayMs(others);
     g_appMixer.SetExtraDelays(delay, others);
 }
+
+// الاختصار: إظهار الترجمة فوق اللعبة على شاشتك أو إخفاؤها
+//  - في ملفات مفعّلة: منطفّيها كلها (ومنتذكّرها)
+//  - ما في: منرجّع اللي طفّيناها ، وإلا ملف طبقة الترجمة بالمشهد ، وإلا أول ملف
+void ToggleTranslationOverlay()
+{
+    static std::vector<std::wstring> lastOn;
+    std::vector<TranslateProfile> all = TranslateProfiles();
+    if (all.empty())
+    {
+        Notify(Glyph::Warning, Theme::Yellow, L"لا يوجد ملف ترجمة", L"افتح «ترجمة اللعبة» من «إضافة مصدر» أولًا");
+        return;
+    }
+    std::vector<std::wstring> on;
+    for (const TranslateProfile& p : all)
+        if (p.playerOverlay) on.push_back(p.id);
+    if (!on.empty())
+    {
+        lastOn = on;
+        for (TranslateProfile& p : all)
+            if (p.playerOverlay) { p.playerOverlay = false; SetTranslateProfile(p, true); }
+        Notify(Glyph::Check, Theme::SubText, L"أُخفيت الترجمة عن شاشتك", L"تبقى ظاهرة للمشاهدين في البث");
+        return;
+    }
+    std::vector<std::wstring> want;
+    for (const std::wstring& id : lastOn)
+        for (const TranslateProfile& p : all)
+            if (p.id == id) want.push_back(id);
+    if (want.empty())
+    {
+        std::lock_guard<std::mutex> lock(g_scene.mutex);
+        for (const SceneLayer& l : g_scene.layers)
+            if (l.kind == LayerKind::Translation && !l.source.empty()) { want.push_back(l.source); break; }
+    }
+    if (want.empty())
+        want.push_back(all.front().id);
+    std::wstring name;
+    for (TranslateProfile& p : all)
+        if (std::find(want.begin(), want.end(), p.id) != want.end())
+        {
+            p.playerOverlay = true;
+            SetTranslateProfile(p, true);
+            if (name.empty()) name = p.name;
+        }
+    Notify(Glyph::Game, Theme::Green, L"الترجمة تظهر على شاشتك", L"«" + name + L"» • لا تظهر في البث");
+}

@@ -112,6 +112,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             g_streamStatus = g_streamer.Status();
         if (g_tick % 15 == 7)              // ترجمة اللعبة: تأخير الصورة والصوت
             UpdateMediaDelays();
+        UpdatePlayerOverlays();            // الترجمة فوق اللعبة على شاشتك (بتنظّم وقتها لحالها)
         if (g_tick % 150 == 75)            // كل 5 ثواني تقريباً
             CheckDiskSpace();
         if (g_tick % 60 == 30 && g_tick > 90)   // كل ثانيتين: في لعبة؟
@@ -640,6 +641,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         case HK_MARKER:
             AddMarker();
             break;
+        case HK_TRANSLATE_OVERLAY:
+            ToggleTranslationOverlay();
+            break;
         case HK_OVERLAY:
             if (g_overlayCorner) { g_overlayLastCorner = g_overlayCorner; g_overlayCorner = 0; }
             else                 g_overlayCorner = g_overlayLastCorner ? g_overlayLastCorner : 1;
@@ -711,6 +715,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_FRAME);
+        ShutdownPlayerOverlays();
         ShutdownTranslator();
         SaveScenes();
         g_hotkeys.UnregisterAll();

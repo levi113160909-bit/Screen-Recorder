@@ -9,7 +9,9 @@
 //   - الأسلوب: اللهجة ، اسم اللعبة ، تلطيف الألفاظ
 //   - الأسماء والمصطلحات (Jason = جيسون)
 //   - المزامنة: تأخير الصورة والصوت
-//   - الشكل وقراءة النص
+//   - الشكل
+//   - الترجمة على شاشتك (فوق اللعبة إلك إنت)
+//   - قراءة النص
 // =============================================================
 #pragma once
 #include "Panel.h"
@@ -59,6 +61,8 @@ private:
     float DrawGlossary(float y, float L, float R);
     float DrawSync(float y, float L, float R);
     float DrawLook(float y, float L, float R);
+    float DrawPlayer(float y, float L, float R);
+    float DrawReading(float y, float L, float R);
     float ToggleRow(float y, float L, float R, const std::wstring& label, const std::wstring& sub, bool on, int id);
     void  RunTest();
 
@@ -68,6 +72,7 @@ private:
     TranslateProfile               m_p;
     std::vector<TranslateProfile>  m_all;
     std::vector<CameraInfo>        m_devices;
+    std::vector<CaptureTarget>     m_monitors;      // مرة وحدة (البحث عن الشاشات كل رسمة تقيل)
     float                          m_height = 900;
     int                            m_frame = 0;
 

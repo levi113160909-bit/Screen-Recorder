@@ -91,6 +91,10 @@ struct TranslateProfile
     float        fontScale  = 1.0f;
     float        boxOpacity = 0.88f;
     int          colorIndex = 0;
+
+    // الترجمة فوق اللعبة إلك إنت (نافذة شفافة فوق كل شي ، ما بتطلع بالبث ولا بالتسجيل)
+    bool         playerOverlay = false;
+    RECT         overlayMonitor{};     // لأجهزة الالتقاط: الشاشة اللي عليها صورة اللعبة (فاضي = الرئيسية)
 };
 
 // ---------- الملفات الشخصية والمفاتيح ----------
@@ -133,7 +137,16 @@ std::shared_ptr<const MediaFrame> TranslationLayerFrame(const SceneLayer& layer,
 void SetTranslatePlaceholder(bool on);
 
 // صورة المصدر الحيّة (للنافذة: لتحدّد مكان الترجمة عليها)
+// الشاشة: بتنصوّر بخيط بالخلفية كذا مرة بالثانية (مصغّرة) ، فالنداء سريع وما بيعلّق الواجهة
 std::shared_ptr<const MediaFrame> TranslateSourceFrame(const TranslateProfile& p);
+
+// الجملة اللي ظاهرة هلق (بلا تأخير) ، مترجمة: لعرضها إلك فوق اللعبة
+// (بتخلّي القراءة شغّالة طول ما عم تنادِها)
+bool TranslateLiveLine(const std::wstring& profileId, std::wstring& arabic);
+
+// صورة مربع الترجمة بهالحجم (BGRA مضروبة بالشفافية ، متل اللي بالبث). محفوظة: لا تعدّلها
+std::shared_ptr<const MediaFrame> RenderTranslationBox(const std::wstring& text, int width, int height,
+                                                       const TranslateProfile& p, bool dim);
 
 // البرنامج عم يسكّر: وقّف كل الخيوط
 void ShutdownTranslator();

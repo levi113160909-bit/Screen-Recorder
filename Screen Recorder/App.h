@@ -68,6 +68,7 @@
 #include "DevicePanel.h"
 #include "Translator.h"
 #include "TranslationPanel.h"
+#include "PlayerOverlay.h"
 #include <shobjidl.h>
 #include <commdlg.h>
 #include <wincrypt.h>
@@ -457,6 +458,7 @@ std::vector<CameraInfo> SceneDevices();
 void AddTranslationLayer(const std::wstring& profileId);
 void FitTranslationLayers(const std::wstring& profileId);
 void OpenTranslationPanel(int layerId);
+void ToggleTranslationOverlay();     // الاختصار: الترجمة فوق اللعبة على شاشتك (تشغيل/إيقاف)
 void UpdateMediaDelays();
 
 // ---- AppTray.cpp: أيقونة جنب الساعة: الإخفاء والإظهار، قائمتها، والخروج ----

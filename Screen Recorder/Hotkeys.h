@@ -41,6 +41,7 @@ enum HotkeyAction : int
     HK_SCREENSHOT,      // لقطة شاشة (صورة PNG)
     HK_MARKER,          // علامة بنص التسجيل
     HK_PUSH_TO_TALK,    // اضغط لتتكلم (مطوّلاً): المايك بيشتغل بس وانت ضاغط
+    HK_TRANSLATE_OVERLAY, // إظهار/إخفاء الترجمة العربية فوق اللعبة (على شاشتك)
     HK_COUNT
 };
 

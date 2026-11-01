@@ -144,6 +144,9 @@
     <ClCompile Include="TranslationPanel.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="PlayerOverlay.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DeviceControl.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -330,6 +333,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="TranslationPanel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="PlayerOverlay.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="RegionSelect.h">
