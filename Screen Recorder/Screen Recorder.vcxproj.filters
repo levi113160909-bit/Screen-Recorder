@@ -147,6 +147,12 @@
     <ClCompile Include="PlayerOverlay.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ScreenTranslate.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ScreenTranslateControl.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DeviceControl.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -336,6 +342,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="PlayerOverlay.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ScreenTranslate.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="RegionSelect.h">

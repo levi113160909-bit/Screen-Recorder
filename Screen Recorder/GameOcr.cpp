@@ -99,6 +99,81 @@ bool OcrReader::Read(const uint8_t* bgra, int width, int height, int stride, std
     }
 }
 
+bool OcrReader::ReadLines(const uint8_t* bgra, int width, int height, int stride, std::vector<OcrLineBox>& lines)
+{
+    lines.clear();
+    if (!m->engine || !bgra || width < 8 || height < 8)
+        return false;
+    try
+    {
+        // أكبر من حد القارئ (مثلاً 4K): منصغّرها بعدد صحيح ، ومنرجّع الأماكن للحجم الأصلي
+        const int maxDim = (int)wmo::OcrEngine::MaxImageDimension();
+        const int scale = std::max(1, (std::max(width, height) + maxDim - 1) / std::max(1, maxDim));
+        const int w = width / scale, h = height / scale;
+        wgi::SoftwareBitmap bmp(wgi::BitmapPixelFormat::Bgra8, w, h, wgi::BitmapAlphaMode::Premultiplied);
+        const uint32_t size = (uint32_t)w * h * 4;
+        wss::Buffer buf(size);
+        uint8_t* dst = buf.data();
+        if (scale == 1)
+        {
+            for (int y = 0; y < h; ++y)
+                memcpy(dst + (size_t)y * w * 4, bgra + (size_t)y * stride, (size_t)w * 4);
+        }
+        else
+        {
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                    memcpy(dst + ((size_t)y * w + x) * 4, bgra + (size_t)y * scale * stride + (size_t)x * scale * 4, 4);
+        }
+        buf.Length(size);
+        bmp.CopyFromBuffer(buf);
+
+        const wmo::OcrResult result = m->engine.RecognizeAsync(bmp).get();
+        for (const wmo::OcrLine& line : result.Lines())
+        {
+            // القارئ أحياناً بيجمع عناصر بعيدة عن بعض بسطر واحد (متل قائمة بالعرض: "Items   Map   Quests"):
+            // فراغ كبير بين كلمتين = عنصر جديد
+            float lineH = 0;
+            for (const wmo::OcrWord& word : line.Words())
+                lineH = std::max(lineH, word.BoundingRect().Height);
+            OcrLineBox b;
+            float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+            auto flush = [&]
+            {
+                if (!b.text.empty() && x1 > x0 && y1 > y0)
+                {
+                    b.x = x0 * scale;
+                    b.y = y0 * scale;
+                    b.w = (x1 - x0) * scale;
+                    b.h = (y1 - y0) * scale;
+                    lines.push_back(b);
+                }
+                b = OcrLineBox{};
+                x0 = y0 = 1e9f;
+                x1 = y1 = -1e9f;
+            };
+            for (const wmo::OcrWord& word : line.Words())
+            {
+                const winrt::Windows::Foundation::Rect r = word.BoundingRect();
+                if (!b.text.empty() && r.X - x1 > std::max(12.0f, lineH * 1.8f))
+                    flush();
+                if (!b.text.empty()) b.text += L' ';
+                b.text += word.Text().c_str();
+                x0 = std::min(x0, r.X);
+                y0 = std::min(y0, r.Y);
+                x1 = std::max(x1, r.X + r.Width);
+                y1 = std::max(y1, r.Y + r.Height);
+            }
+            flush();
+        }
+        return true;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
 bool OcrHasEnglish()
 {
     try

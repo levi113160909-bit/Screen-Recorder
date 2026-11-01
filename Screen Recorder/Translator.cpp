@@ -16,6 +16,7 @@
 #include <shlobj.h>
 #include <wincrypt.h>
 #include <wincodec.h>
+#include <objbase.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
@@ -85,6 +86,7 @@ bool EngineIsAi(TransEngine e)
 }
 bool EngineNeedsKey(TransEngine e)  { return e != TransEngine::Ollama; }
 bool EngineHasModel(TransEngine e)  { return EngineIsAi(e); }
+bool EngineSeesImages(TransEngine e) { return e == TransEngine::Gemini || e == TransEngine::Claude || e == TransEngine::OpenAI; }
 bool EngineHasExtra(TransEngine e)  { return e == TransEngine::Azure || e == TransEngine::Ollama; }
 
 const wchar_t* EngineExtraLabel(TransEngine e)
@@ -252,7 +254,7 @@ namespace
                      CleanField(g_engines[e].model).c_str(), CleanField(g_engines[e].extra).c_str());
         for (const TranslateProfile& p : g_profiles)
         {
-            fwprintf(f, L"P\t%ls\t%ls\t%d\t%ls\t%ls\t%ld\t%ld\t%ld\t%ld\t%ls\t%ls\t%ls\t%ls\t%d\t%d\t%ls\t%d\t%d\t%d\t%d\t%ls\t%ls\t%d\t%d\t%ld\t%ld\t%ld\t%ld\n",
+            fwprintf(f, L"P\t%ls\t%ls\t%d\t%ls\t%ls\t%ld\t%ld\t%ld\t%ld\t%ls\t%ls\t%ls\t%ls\t%d\t%d\t%ls\t%d\t%d\t%d\t%d\t%ls\t%ls\t%d\t%d\t%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\n",
                      CleanField(p.id).c_str(), CleanField(p.name).c_str(), p.fromScreen ? 1 : 0,
                      CleanField(p.deviceLink).c_str(), CleanField(p.deviceName).c_str(),
                      p.monitor.left, p.monitor.top, p.monitor.right, p.monitor.bottom,
@@ -261,7 +263,7 @@ namespace
                      p.delayMs, p.delayAll ? 1 : 0, p.threshold,
                      Num(p.fontScale).c_str(), Num(p.boxOpacity).c_str(), p.colorIndex,
                      p.playerOverlay ? 1 : 0, p.overlayMonitor.left, p.overlayMonitor.top,
-                     p.overlayMonitor.right, p.overlayMonitor.bottom);
+                     p.overlayMonitor.right, p.overlayMonitor.bottom, p.settleMs, p.retranslate ? 1 : 0, p.visionRead ? 1 : 0);
             for (const GlossaryItem& g : p.glossary)
                 fwprintf(f, L"G\t%ls\t%ls\t%ls\n", CleanField(p.id).c_str(), CleanField(g.en).c_str(), CleanField(g.ar).c_str());
         }
@@ -325,6 +327,13 @@ namespace
                     t.playerOverlay  = p[24] == L"1";
                     t.overlayMonitor = { _wtol(p[25].c_str()), _wtol(p[26].c_str()), _wtol(p[27].c_str()), _wtol(p[28].c_str()) };
                 }
+                if (p.size() >= 31)          // انتظار اكتمال الجملة
+                {
+                    t.settleMs    = std::clamp(_wtoi(p[29].c_str()), 0, 5000);
+                    t.retranslate = p[30] == L"1";
+                }
+                if (p.size() >= 32)          // قراءة الصورة بالذكاء الصناعي
+                    t.visionRead = p[31] == L"1";
                 if (!t.id.empty())
                     g_profiles.push_back(t);
             }
@@ -460,7 +469,8 @@ namespace
         // "v2": اسم المتكلّم صار ينفصل عن الجملة ، والطلب صار أدق: الترجمات القديمة ما منعيد استعمالها
         // ("s:" = في اسم متكلّم ، لحتى ما تختلط مع نفس الجملة بلا اسم)
         const bool speaker = !en.empty() && en[0] == L'[';
-        return L"v2|" + std::to_wstring((int)p.engine) + L"|" + std::to_wstring((int)p.dialect) + L"|" + (speaker ? L"s:" : L"") + k;
+        // "v3": قراءة الصورة بالذكاء الصناعي (ترجمات أدق من القراءة القديمة)
+        return L"v3|" + std::to_wstring((int)p.engine) + L"|" + std::to_wstring((int)p.dialect) + L"|" + (speaker ? L"s:" : L"") + k;
     }
 
     // قديش الجملتين متشابهين (القارئ أحياناً بيغلط بحرف)
@@ -494,7 +504,7 @@ namespace
     }
 
     // تنظيف جواب الخدمة: بلا علامات تنصيص ولا تفكير ولا أسطر
-    std::wstring CleanAnswer(std::wstring s)
+    std::wstring CleanAnswer(std::wstring s, bool keepLines = false)
     {
         for (;;)   // نماذج "بتفكّر" (<think>...</think>)
         {
@@ -503,6 +513,8 @@ namespace
             const size_t b = s.find(L"</think>", a);
             s.erase(a, b == std::wstring::npos ? std::wstring::npos : b + 8 - a);
         }
+        if (keepLines)                 // ترجمة الشاشة: كل سطر عنصر
+            return Trim(s);
         for (wchar_t& c : s)
             if (c == L'\n' || c == L'\r' || c == L'\t') c = L' ';
         s = Trim(s);
@@ -624,10 +636,12 @@ namespace
     // =========================================================
     //  3) الاتصال بخدمة الترجمة
     // =========================================================
+    // batchRule: ترجمة الشاشة كلها (كذا نص بطلب واحد): قاعدة إضافية ، مساحة رد أكبر ، والأسطر بتضل
     bool CallEngineRaw(const TranslateProfile& p, EngineConfig cfg, const std::wstring& english,
                        const std::vector<std::pair<std::wstring, std::wstring>>& context, const std::wstring& speaker,
-                       std::wstring& arabic, std::wstring& error, bool* rateLimited)
+                       std::wstring& arabic, std::wstring& error, bool* rateLimited, const std::wstring& batchRule = L"")
     {
+        const bool batch = !batchRule.empty();
         if (rateLimited) *rateLimited = false;
         const TransEngine e = p.engine;
         if (cfg.model.empty()) cfg.model = EngineDefaultModel(e);
@@ -636,7 +650,7 @@ namespace
             error = L"أدخل مفتاح الخدمة أولًا";
             return false;
         }
-        const std::wstring sys = SystemPrompt(p, context, speaker);
+        const std::wstring sys = SystemPrompt(p, context, speaker) + batchRule;
         const std::string  jsys = JsonQuote(sys), juser = JsonQuote(english);
         std::wstring url;
         std::vector<std::wstring> headers = { L"Content-Type: application/json; charset=utf-8" };
@@ -659,10 +673,10 @@ namespace
             const bool minimalOk = cfg.model.find(L"3.8") == std::wstring::npos && cfg.model.find(L"gemini-4") == std::wstring::npos;
             std::string gen;
             if (old)
-                gen = "\"temperature\":0.3,\"maxOutputTokens\":400" +
+                gen = "\"temperature\":0.3,\"maxOutputTokens\":" + std::string(batch ? "4096" : "400") +
                       std::string(flash ? ",\"thinkingConfig\":{\"thinkingBudget\":0}" : "");
             else    // النماذج الجديدة: الحرارة الافتراضية ، ومساحة أكبر لأن التفكير بيحسب من الحد
-                gen = "\"maxOutputTokens\":2048" +
+                gen = "\"maxOutputTokens\":" + std::string(batch ? "8192" : "2048") +
                       std::string(flash && !lite ? (minimalOk ? ",\"thinkingConfig\":{\"thinkingLevel\":\"minimal\"}"
                                                               : ",\"thinkingConfig\":{\"thinkingLevel\":\"low\"}") : "");
             body = "{\"systemInstruction\":{\"parts\":[{\"text\":" + jsys + "}]},"
@@ -674,7 +688,8 @@ namespace
             url = L"https://api.anthropic.com/v1/messages";
             headers.push_back(L"x-api-key: " + cfg.key);
             headers.push_back(L"anthropic-version: 2023-06-01");
-            body = "{\"model\":" + JsonQuote(cfg.model) + ",\"max_tokens\":400,\"temperature\":0.3,\"system\":" + jsys +
+            body = "{\"model\":" + JsonQuote(cfg.model) + ",\"max_tokens\":" + std::string(batch ? "4096" : "400") +
+                   ",\"temperature\":0.3,\"system\":" + jsys +
                    ",\"messages\":[{\"role\":\"user\",\"content\":" + juser + "}]}";
             break;
         case TransEngine::OpenAI:
@@ -716,7 +731,7 @@ namespace
             return false;
         }
 
-        const HttpResponse r = HttpRequest(L"POST", url, headers, body, e == TransEngine::Ollama ? 60000 : 15000);
+        const HttpResponse r = HttpRequest(L"POST", url, headers, body, e == TransEngine::Ollama ? 60000 : (batch ? 40000 : 15000));
         if (!r.ok || r.status < 200 || r.status >= 300)
         {
             if (rateLimited) *rateLimited = r.status == 429;
@@ -749,7 +764,7 @@ namespace
         case TransEngine::Google: text = v["data"]["translations"][0]["translatedText"].Str(); break;
         default: break;
         }
-        arabic = CleanAnswer(text);
+        arabic = CleanAnswer(text, batch);
         if (arabic.empty())
         {
             error = L"الخدمة أرجعت ترجمة فارغة";
@@ -809,6 +824,123 @@ bool TranslateOnce(const TranslateProfile& p, const std::wstring& english, std::
     return ok;
 }
 
+// -------------------------------------------------------------
+//  ترجمة الشاشة كلها: كل النصوص بطلب واحد
+// -------------------------------------------------------------
+namespace
+{
+    std::mutex                           g_screenCacheMx;
+    std::map<std::wstring, std::wstring> g_screenCache;      // القوائم بتتكرر كتير: منحفظ (بالذاكرة)
+}
+
+bool TranslateScreenTexts(const TranslateProfile& p, std::vector<ScreenTextItem>& items, std::wstring& error)
+{
+    std::vector<size_t> todo;
+    {
+        std::lock_guard<std::mutex> lock(g_screenCacheMx);
+        for (size_t i = 0; i < items.size(); ++i)
+        {
+            auto it = g_screenCache.find(L"scr|" + CacheKey(p, items[i].en));
+            if (it != g_screenCache.end()) items[i].ar = it->second;
+            else                           todo.push_back(i);
+        }
+    }
+    if (todo.empty())
+        return true;
+
+    const EngineConfig cfg = GetEngineConfig(p.engine);
+    std::wstring joined;
+    if (EngineIsAi(p.engine))
+    {
+        // مرقّمة ، والجواب "رقم|ترجمة" بكل سطر
+        for (size_t n = 0; n < todo.size(); ++n)
+        {
+            std::wstring t = items[todo[n]].en;
+            for (wchar_t& c : t) if (c == L'\n' || c == L'\r' || c == L'|') c = L' ';
+            joined += std::to_wstring(n + 1) + L"|" + t + L"\n";
+        }
+        const std::wstring rule =
+            L"\nSCREEN MODE: you receive several numbered texts read from ONE game screen "
+            L"(menus, buttons, item names, quest text, messages), one per line as \"N|text\".\n"
+            L"- Translate EVERY item. Reply ONLY with lines in the form \"N|translation\", same numbers, one per line.\n"
+            L"- Short menu labels and buttons stay short (one or two words). Numbers, key names and symbols stay as they are.\n"
+            L"- Each line is separate; use the other items only as context.\n";
+        std::wstring answer;
+        if (!CallEngineRaw(p, cfg, joined, {}, L"", answer, error, nullptr, rule))
+            return false;
+        size_t pos = 0;
+        while (pos < answer.size())
+        {
+            size_t end = answer.find(L'\n', pos);
+            if (end == std::wstring::npos) end = answer.size();
+            const std::wstring line = Trim(answer.substr(pos, end - pos));
+            pos = end + 1;
+            const size_t bar = line.find(L'|');
+            if (bar == std::wstring::npos || bar == 0)
+                continue;
+            const int n = _wtoi(line.substr(0, bar).c_str());
+            const std::wstring ar = Trim(line.substr(bar + 1));
+            if (n >= 1 && n <= (int)todo.size() && !ar.empty())
+                items[todo[n - 1]].ar = ar;
+        }
+    }
+    else
+    {
+        // الترجمة الآلية بتحافظ على الأسطر: منبعتهم مع بعض ، وإذا ما رجع نفس العدد: واحد واحد
+        for (size_t n = 0; n < todo.size(); ++n)
+        {
+            std::wstring t = items[todo[n]].en;
+            for (wchar_t& c : t) if (c == L'\n' || c == L'\r') c = L' ';
+            joined += (n ? L"\n" : L"") + t;
+        }
+        std::wstring answer;
+        // (قاعدة فاضية بس لنخلّي الأسطر بالجواب: الترجمة الآلية ما بتقرا التعليمات)
+        bool ok = CallEngineRaw(p, cfg, joined, {}, L"", answer, error, nullptr, L" ");
+        std::vector<std::wstring> parts;
+        if (ok)
+        {
+            size_t pos = 0;
+            while (pos <= answer.size())
+            {
+                size_t end = answer.find(L'\n', pos);
+                if (end == std::wstring::npos) end = answer.size();
+                parts.push_back(Trim(answer.substr(pos, end - pos)));
+                pos = end + 1;
+            }
+        }
+        if (ok && parts.size() == todo.size())
+        {
+            for (size_t n = 0; n < todo.size(); ++n)
+                items[todo[n]].ar = parts[n];
+        }
+        else
+        {
+            for (size_t n = 0; n < todo.size(); ++n)
+            {
+                std::wstring ar;
+                if (CallEngineRaw(p, cfg, items[todo[n]].en, {}, L"", ar, error, nullptr))
+                    items[todo[n]].ar = ar;
+            }
+        }
+    }
+
+    bool any = false;
+    {
+        std::lock_guard<std::mutex> lock(g_screenCacheMx);
+        if (g_screenCache.size() > 20000)
+            g_screenCache.clear();
+        for (size_t i : todo)
+            if (!items[i].ar.empty())
+            {
+                g_screenCache[L"scr|" + CacheKey(p, items[i].en)] = items[i].ar;
+                any = true;
+            }
+    }
+    if (!any && error.empty())
+        error = L"لم تُرجع الخدمة أي ترجمة";
+    return any || todo.size() < items.size();
+}
+
 std::vector<std::wstring> OllamaModels(const std::wstring& address, std::wstring* error)
 {
     std::vector<std::wstring> list;
@@ -842,9 +974,26 @@ namespace
         uint64_t     id = 0;
         ULONGLONG    start = 0, end = 0;        // end = 0: لسا ظاهرة
         std::wstring en, ar;
-        int          seen = 1;                  // كم مرة قريناها (مرتين = أكيد مش غلط بالقراءة)
+        std::wstring last;                      // آخر قراءة (لنعرف إذا الجملة وقفت عن الكتابة)
+        int          seen = 1;                  // كم مرة قريناها
+        ULONGLONG    changed = 0;               // آخر مرة تغيّر فيها النص (لنعرف إذا خلصت الكتابة)
         bool         requested = false, done = false, failed = false, inflight = false;
+        bool         stale = false;             // الجملة كبرت بعد الترجمة: بدها ترجمة جديدة (والقديمة بتضل ظاهرة لحد ما توصل)
+        // صورة مكان الترجمة لحظة طلب الترجمة (لقراءة الصورة بالذكاء الصناعي)
+        std::shared_ptr<const std::vector<uint8_t>> image;
+        int          imageW = 0, imageH = 0;
     };
+
+    // الجملة الجديدة تكملة للقديمة؟ (ألعاب بتكتب الكلام حرف حرف)
+    // آخر كلمة بالقديمة ممكن تكون منقوصة ، فمنقارن بدونها
+    bool Grows(const std::wstring& before, const std::wstring& now)
+    {
+        const std::wstring a = Key(before), b = Key(now);
+        if (a.size() < 3 || b.size() <= a.size())
+            return false;
+        const size_t n = a.size() > 8 ? a.size() - 6 : a.size() - 2;
+        return b.compare(0, n, a, 0, n) == 0;
+    }
 
     // صورة جزء من الشاشة (لألعاب الكمبيوتر). maxW > 0: مصغّرة لهالعرض (للمعاينة)
     // بلا CAPTUREBLT: هالخيار بيوقّف رسم الشاشة كلها لحظة كل مرة (ثقل ورجفة بالماوس واللعبة)،
@@ -915,6 +1064,343 @@ namespace
             }
         }
         return words >= 1 && words <= 3;
+    }
+
+    // صورة مكان الترجمة -> صورة أوضح للقارئ:
+    //  - تكبير ناعم (ثنائي الخطي) لحد 3 أضعاف ، لحتى يصير ارتفاع الصورة حوالي 300 بكسل
+    //  - threshold > 0: النص الفاتح أسود والباقي أبيض (بعد التكبير: حواف أنعم)
+    //  - إطار 16 بكسل حوالين الصورة
+    void PrepareForOcr(const std::vector<uint8_t>& src, int w, int h, int threshold,
+                       std::vector<uint8_t>& out, int& ow, int& oh)
+    {
+        double scale = std::clamp(300.0 / std::max(1, h), 1.0, 3.0);
+        if (w * scale > 2400) scale = std::max(1.0, 2400.0 / w);
+        const double shrink = w > 2400 ? 2400.0 / w : 1.0;            // كبيرة كتير: منصغّرها
+        const double f = scale * shrink;
+        const int pad = 16;
+        const int iw = std::max(8, (int)std::lround(w * f)), ih = std::max(8, (int)std::lround(h * f));
+        ow = iw + pad * 2;
+        oh = ih + pad * 2;
+        out.assign((size_t)ow * oh * 4, 0);
+        const uint8_t bg = threshold > 0 ? 255 : 0;
+        for (size_t i = 0; i < out.size(); i += 4)
+        {
+            out[i] = out[i + 1] = out[i + 2] = bg;
+            out[i + 3] = 255;
+        }
+        for (int y = 0; y < ih; ++y)
+        {
+            const double fy = std::clamp((y + 0.5) / f - 0.5, 0.0, (double)h - 1);
+            const int y0 = (int)fy, y1 = std::min(h - 1, y0 + 1);
+            const double ty = fy - y0;
+            for (int x = 0; x < iw; ++x)
+            {
+                const double fx = std::clamp((x + 0.5) / f - 0.5, 0.0, (double)w - 1);
+                const int x0 = (int)fx, x1 = std::min(w - 1, x0 + 1);
+                const double tx = fx - x0;
+                const uint8_t* a = src.data() + ((size_t)y0 * w + x0) * 4;
+                const uint8_t* b = src.data() + ((size_t)y0 * w + x1) * 4;
+                const uint8_t* c = src.data() + ((size_t)y1 * w + x0) * 4;
+                const uint8_t* d = src.data() + ((size_t)y1 * w + x1) * 4;
+                uint8_t* o = out.data() + ((size_t)(y + pad) * ow + (x + pad)) * 4;
+                double px[3];
+                for (int k = 0; k < 3; ++k)
+                    px[k] = (a[k] * (1 - tx) + b[k] * tx) * (1 - ty) + (c[k] * (1 - tx) + d[k] * tx) * ty;
+                if (threshold > 0)
+                {
+                    // النص الفاتح = أسود ، الباقي = أبيض (أوضح للقارئ)
+                    const double lum = (px[2] * 2 + px[1] * 5 + px[0]) / 8;
+                    o[0] = o[1] = o[2] = lum >= threshold ? 0 : 255;
+                }
+                else
+                {
+                    o[0] = (uint8_t)px[0];
+                    o[1] = (uint8_t)px[1];
+                    o[2] = (uint8_t)px[2];
+                }
+            }
+        }
+    }
+
+    // نسبة الحروف بالسطر (سطر كله رموز = غلطة قراءة من المشهد)
+    bool MostlyLetters(const std::wstring& l)
+    {
+        int letters = 0, other = 0;
+        for (wchar_t c : l)
+        {
+            if (c == L' ') continue;
+            if (std::iswalpha(c)) ++letters; else ++other;
+        }
+        return letters >= 2 && letters >= other * 2;
+    }
+
+    // أسطر القارئ (مع أماكنها) -> نص واحد ، ومع اسم المتكلّم بأوله "[Name] ..."
+    std::wstring JoinOcrLines(std::vector<OcrLineBox> boxes)
+    {
+        // القارئ ممكن يقسم السطر الواحد لقطع (فراغات كبيرة): منرجّع كل قطع نفس السطر مع بعض
+        struct Row { float y = 0, h = 0, x = 0; std::vector<OcrLineBox> parts; std::wstring text; };
+        std::vector<Row> rows;
+        std::sort(boxes.begin(), boxes.end(), [](const OcrLineBox& a, const OcrLineBox& b) { return a.y < b.y; });
+        for (const OcrLineBox& b : boxes)
+        {
+            Row* into = nullptr;
+            for (Row& r : rows)
+                if (std::fabs((b.y + b.h / 2) - (r.y + r.h / 2)) < std::max(b.h, r.h) * 0.5f)
+                    into = &r;
+            if (!into)
+            {
+                rows.push_back(Row{ b.y, b.h, b.x, {}, {} });
+                into = &rows.back();
+            }
+            into->parts.push_back(b);
+            into->h = std::max(into->h, b.h);
+            into->x = std::min(into->x, b.x);
+        }
+        std::vector<Row> clean;
+        for (Row& r : rows)
+        {
+            std::sort(r.parts.begin(), r.parts.end(), [](const OcrLineBox& a, const OcrLineBox& b) { return a.x < b.x; });
+            for (const OcrLineBox& p : r.parts)
+                r.text += (r.text.empty() ? L"" : L" ") + p.text;
+            r.text = Trim(r.text);
+            while (!r.text.empty() && (r.text[0] == L'-' || r.text[0] == L'|' || r.text[0] == L'—')) r.text = Trim(r.text.substr(1));
+            if (MostlyLetters(r.text))
+                clean.push_back(r);
+        }
+        if (clean.empty())
+            return L"";
+
+        // السطر الأول اسم المتكلّم؟ قصير ، وخطّه أصغر من الباقي (أو بيشبه اسم)
+        std::wstring text;
+        size_t first = 0;
+        if (clean.size() >= 2)
+        {
+            float avg = 0;
+            for (size_t i = 1; i < clean.size(); ++i) avg += clean[i].h;
+            avg /= (float)(clean.size() - 1);
+            const std::wstring& t = clean[0].text;
+            int words = 1;
+            for (wchar_t c : t) if (c == L' ') ++words;
+            const bool shortLine = t.size() <= 24 && words <= 3;
+            if (shortLine && (clean[0].h < avg * 0.85f || LooksLikeSpeaker(t)))
+            {
+                // منشيل الرموز اللي القارئ زادها ("Kaikl(" -> "Kaikl")
+                std::wstring name;
+                for (wchar_t c : t)
+                    if (std::iswalpha(c) || c == L' ' || c == L'\'' || c == L'-') name += c;
+                name = Trim(name);
+                if (name.size() >= 2)
+                {
+                    text = L"[" + name + L"]";
+                    first = 1;
+                }
+            }
+        }
+        for (size_t i = first; i < clean.size(); ++i)
+            text += (text.empty() ? L"" : L" ") + clean[i].text;
+        return text;
+    }
+
+    // ---------- قراءة الصورة بالذكاء الصناعي ----------
+    // BGRA -> JPEG (أصغر من PNG بكتير: رفع أسرع) -> base64
+    bool EncodeJpegBase64(const std::vector<uint8_t>& bgra, int w, int h, std::string& out)
+    {
+        std::vector<uint8_t> bgr((size_t)w * h * 3);
+        for (size_t i = 0, j = 0; j < bgr.size(); i += 4, j += 3)
+        {
+            bgr[j] = bgra[i]; bgr[j + 1] = bgra[i + 1]; bgr[j + 2] = bgra[i + 2];
+        }
+        const HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        bool ok = false;
+        {
+            ComPtr<IWICImagingFactory> wic;
+            ComPtr<IStream> stream;
+            ComPtr<IWICBitmapEncoder> enc;
+            ComPtr<IWICBitmapFrameEncode> frame;
+            WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppBGR;
+            if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) &&
+                SUCCEEDED(CreateStreamOnHGlobal(nullptr, TRUE, &stream)) &&
+                SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, &enc)) &&
+                SUCCEEDED(enc->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+                SUCCEEDED(enc->CreateNewFrame(&frame, nullptr)) &&
+                SUCCEEDED(frame->Initialize(nullptr)) &&
+                SUCCEEDED(frame->SetSize((UINT)w, (UINT)h)) &&
+                SUCCEEDED(frame->SetPixelFormat(&fmt)) && IsEqualGUID(fmt, GUID_WICPixelFormat24bppBGR) &&
+                SUCCEEDED(frame->WritePixels((UINT)h, (UINT)w * 3, (UINT)bgr.size(), bgr.data())) &&
+                SUCCEEDED(frame->Commit()) && SUCCEEDED(enc->Commit()))
+            {
+                HGLOBAL hg = nullptr;
+                STATSTG st{};
+                if (SUCCEEDED(GetHGlobalFromStream(stream.Get(), &hg)) && SUCCEEDED(stream->Stat(&st, STATFLAG_NONAME)))
+                {
+                    const DWORD size = st.cbSize.LowPart;
+                    if (const BYTE* data = (const BYTE*)GlobalLock(hg))
+                    {
+                        DWORD len = 0;
+                        if (CryptBinaryToStringA(data, size, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &len) && len)
+                        {
+                            out.assign(len, '\0');
+                            ok = CryptBinaryToStringA(data, size, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, out.data(), &len) != FALSE;
+                            out.resize(len);
+                        }
+                        GlobalUnlock(hg);
+                    }
+                }
+            }
+        }
+        if (SUCCEEDED(hrCom))
+            CoUninitialize();
+        return ok && !out.empty();
+    }
+
+    // منبعت صورة مكان الترجمة للخدمة: بتقرا الإنكليزي (مع اسم المتكلّم) وبتترجمه بطلب واحد
+    bool CallVision(const TranslateProfile& p, EngineConfig cfg, const std::vector<uint8_t>& crop, int cw, int ch,
+                    const std::vector<std::pair<std::wstring, std::wstring>>& context,
+                    std::wstring& english, std::wstring& arabic, std::wstring& error, bool* rateLimited)
+    {
+        if (rateLimited) *rateLimited = false;
+        const TransEngine e = p.engine;
+        if (!EngineSeesImages(e) || cw < 8 || ch < 8 || crop.size() < (size_t)cw * ch * 4)
+            return false;
+        if (cfg.model.empty()) cfg.model = EngineDefaultModel(e);
+        if (cfg.key.empty())
+        {
+            error = L"أدخل مفتاح الخدمة أولًا";
+            return false;
+        }
+        // الذكاء الصناعي ما بيحتاج التكبير الكبير تبع قارئ ويندوز: منبعتها بحجمها
+        // (أصغر = أسرع وأرخص) ، بس الصغيرة كتير منكبّرها ضعفين ، والعريضة كتير منصغّرها
+        std::vector<uint8_t> img;
+        int iw = cw, ih = ch;
+        if (ch < 70 || cw > 1600)
+        {
+            const double f = ch < 70 ? 2.0 : 1600.0 / cw;
+            iw = std::max(8, (int)(cw * f));
+            ih = std::max(8, (int)(ch * f));
+            img.resize((size_t)iw * ih * 4);
+            for (int y = 0; y < ih; ++y)
+                for (int x = 0; x < iw; ++x)
+                    memcpy(img.data() + ((size_t)y * iw + x) * 4,
+                           crop.data() + ((size_t)std::min(ch - 1, (int)(y / f)) * cw + std::min(cw - 1, (int)(x / f))) * 4, 4);
+        }
+        else
+            img.assign(crop.begin(), crop.begin() + (size_t)cw * ch * 4);
+        std::string b64;
+        if (!EncodeJpegBase64(img, iw, ih, b64))
+        {
+            error = L"تعذّر تجهيز صورة الترجمة";
+            return false;
+        }
+
+        const std::wstring sys = SystemPrompt(p, context, L"") +
+            L"\nIMAGE MODE (this overrides the reply-format rule above): the user sends an IMAGE of the game's subtitle area "
+            L"instead of text.\n"
+            L"1) Read the English subtitle in the image exactly as written. A short name label above or before the sentence "
+            L"is the speaker's name, not part of the sentence.\n"
+            L"2) Translate it following all the rules above. If there is a speaker, start the Arabic with the speaker's name "
+            L"in Arabic letters (use the names list if it is there) followed by \": \" - the speaker is NOT being addressed.\n"
+            L"Reply with exactly two lines and nothing else:\n"
+            L"EN: [Speaker] the English text   (leave out [Speaker] if there is none)\n"
+            L"AR: the Arabic translation\n"
+            L"If there is no readable English text in the image, reply exactly: EN: -\n";
+        const std::string jsys = JsonQuote(sys);
+        const std::string ask = JsonQuote(L"Read and translate this game subtitle.");
+        std::wstring url;
+        std::vector<std::wstring> headers = { L"Content-Type: application/json; charset=utf-8" };
+        std::string body;
+        switch (e)
+        {
+        case TransEngine::Gemini:
+        {
+            url = L"https://generativelanguage.googleapis.com/v1beta/models/" + UrlEncode(cfg.model) + L":generateContent";
+            headers.push_back(L"x-goog-api-key: " + cfg.key);
+            const bool flash = cfg.model.find(L"flash") != std::wstring::npos;
+            const bool old   = cfg.model.find(L"gemini-1") != std::wstring::npos || cfg.model.find(L"gemini-2") != std::wstring::npos;
+            const bool lite  = cfg.model.find(L"lite") != std::wstring::npos;
+            const bool minimalOk = cfg.model.find(L"3.8") == std::wstring::npos && cfg.model.find(L"gemini-4") == std::wstring::npos;
+            std::string gen;
+            if (old)
+                gen = "\"temperature\":0.2,\"maxOutputTokens\":600" +
+                      std::string(flash ? ",\"thinkingConfig\":{\"thinkingBudget\":0}" : "");
+            else
+                gen = "\"maxOutputTokens\":2048" +
+                      std::string(flash && !lite ? (minimalOk ? ",\"thinkingConfig\":{\"thinkingLevel\":\"minimal\"}"
+                                                              : ",\"thinkingConfig\":{\"thinkingLevel\":\"low\"}") : "");
+            body = "{\"systemInstruction\":{\"parts\":[{\"text\":" + jsys + "}]},"
+                   "\"contents\":[{\"role\":\"user\",\"parts\":[{\"inline_data\":{\"mime_type\":\"image/jpeg\",\"data\":\"" + b64 + "\"}},"
+                   "{\"text\":" + ask + "}]}],"
+                   "\"generationConfig\":{" + gen + "}}";
+            break;
+        }
+        case TransEngine::Claude:
+            url = L"https://api.anthropic.com/v1/messages";
+            headers.push_back(L"x-api-key: " + cfg.key);
+            headers.push_back(L"anthropic-version: 2023-06-01");
+            body = "{\"model\":" + JsonQuote(cfg.model) + ",\"max_tokens\":600,\"temperature\":0.2,\"system\":" + jsys +
+                   ",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+                   "\"media_type\":\"image/jpeg\",\"data\":\"" + b64 + "\"}},{\"type\":\"text\",\"text\":" + ask + "}]}]}";
+            break;
+        case TransEngine::OpenAI:
+            url = L"https://api.openai.com/v1/chat/completions";
+            headers.push_back(L"Authorization: Bearer " + cfg.key);
+            body = "{\"model\":" + JsonQuote(cfg.model) + ",\"messages\":[{\"role\":\"system\",\"content\":" + jsys +
+                   "},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":" + ask + "},"
+                   "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64," + b64 + "\"}}]}]}";
+            break;
+        default:
+            return false;
+        }
+
+        const HttpResponse r = HttpRequest(L"POST", url, headers, body, 20000);
+        if (!r.ok || r.status < 200 || r.status >= 300)
+        {
+            if (rateLimited) *rateLimited = r.status == 429;
+            error = ServiceError(r);
+            return false;
+        }
+        JsonValue v;
+        if (!JsonParse(r.body, v))
+        {
+            error = L"جواب غير مفهوم من الخدمة";
+            return false;
+        }
+        std::wstring text;
+        if (e == TransEngine::Gemini)
+        {
+            for (size_t i = 0; i < v["candidates"][0]["content"]["parts"].Size(); ++i)
+                if (!v["candidates"][0]["content"]["parts"][i]["thought"].boolean)
+                    text += v["candidates"][0]["content"]["parts"][i]["text"].Str();
+        }
+        else if (e == TransEngine::Claude)
+        {
+            for (size_t i = 0; i < v["content"].Size(); ++i)
+                if (v["content"][i]["type"].Str() == L"text")
+                    text += v["content"][i]["text"].Str();
+        }
+        else
+            text = v["choices"][0]["message"]["content"].Str();
+
+        // "EN: ..." و "AR: ..."
+        auto field = [&](const wchar_t* tag) -> std::wstring
+        {
+            const size_t a = text.find(tag);
+            if (a == std::wstring::npos)
+                return L"";
+            const size_t from = a + wcslen(tag);
+            size_t to = text.find(L'\n', from);
+            if (to == std::wstring::npos) to = text.size();
+            return Trim(text.substr(from, to - from));
+        };
+        english = field(L"EN:");
+        const std::wstring ar = field(L"AR:");
+        if (english.empty() || english == L"-" || ar.empty())
+        {
+            error = L"لم تجد الخدمة نصًا في الصورة";
+            english.clear();
+            return false;
+        }
+        arabic = CleanAnswer(ar);
+        return !arabic.empty();
     }
 
     class Session : public std::enable_shared_from_this<Session>
@@ -1024,7 +1510,7 @@ namespace
                 ULONGLONG profTick = 0, lastSample = 0, prevTick = 0;
                 uint64_t lastVersion = 0;
                 std::vector<uint8_t> crop, work, screen;
-                std::vector<std::wstring> lines;
+                std::vector<OcrLineBox> boxes;
 
                 while (m_running && !g_shutdown)
                 {
@@ -1095,61 +1581,15 @@ namespace
                     SetSource(true);
 
                     // ---- تجهيز الصورة للقارئ ----
-                    int ow = cw, oh = ch;
-                    const uint8_t* src = crop.data();
-                    // صغيرة؟ منكبّرها ضعفين (القارئ بيحب الحروف الكبيرة) ، كبيرة كتير؟ منصغّرها
-                    int scale = ch < 90 ? 2 : 1;
-                    if (cw * scale > 2400) scale = 1;
-                    const bool shrink = cw > 2400;
-                    if (scale == 2 || shrink || prof.threshold > 0)
-                    {
-                        ow = shrink ? cw / 2 : cw * scale;
-                        oh = shrink ? ch / 2 : ch * scale;
-                        work.resize((size_t)ow * oh * 4);
-                        for (int y = 0; y < oh; ++y)
-                            for (int x = 0; x < ow; ++x)
-                            {
-                                const int sx = shrink ? x * 2 : x / scale, sy = shrink ? y * 2 : y / scale;
-                                const uint8_t* s = crop.data() + ((size_t)sy * cw + sx) * 4;
-                                uint8_t* d = work.data() + ((size_t)y * ow + x) * 4;
-                                if (prof.threshold > 0)
-                                {
-                                    // النص الفاتح = أسود ، الباقي = أبيض (أوضح للقارئ)
-                                    const int lum = (s[2] * 2 + s[1] * 5 + s[0]) / 8;
-                                    const uint8_t v = lum >= prof.threshold ? 0 : 255;
-                                    d[0] = d[1] = d[2] = v;
-                                }
-                                else
-                                {
-                                    d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
-                                }
-                                d[3] = 255;
-                            }
-                        src = work.data();
-                    }
+                    // القارئ بيحب الحروف الكبيرة والواضحة: منكبّر الصورة بطريقة ناعمة (لحد 3 أضعاف حسب حجمها)،
+                    // ومنحط إطار فاضي حواليها (الحروف اللاصقة بالحافة بتضيع عليه)
+                    int ow = 0, oh = 0;
+                    PrepareForOcr(crop, cw, ch, prof.threshold, work, ow, oh);
 
                     std::wstring text;
-                    if (ocr.Ready() && ocr.Read(src, ow, oh, ow * 4, lines))
-                    {
-                        std::vector<std::wstring> clean;
-                        for (std::wstring& l : lines)
-                        {
-                            l = Trim(l);
-                            while (!l.empty() && (l[0] == L'-' || l[0] == L'|' || l[0] == L'—')) l = Trim(l.substr(1));
-                            if (!l.empty())
-                                clean.push_back(l);
-                        }
-                        // السطر الأول اسم لحاله (متل "Joshua" فوق الجملة)؟ منعلّم عليه إنه اسم المتكلّم
-                        size_t first = 0;
-                        if (clean.size() >= 2 && LooksLikeSpeaker(clean[0]))
-                        {
-                            text = L"[" + clean[0] + L"]";
-                            first = 1;
-                        }
-                        for (size_t i = first; i < clean.size(); ++i)
-                            text += (text.empty() ? L"" : L" ") + clean[i];
-                    }
-                    OnReading(Letters(text) >= 3 ? text : std::wstring(), tick, prevTick);
+                    if (ocr.Ready() && ocr.ReadLines(work.data(), ow, oh, ow * 4, boxes))
+                        text = JoinOcrLines(boxes);
+                    OnReading(Letters(text) >= 3 ? text : std::wstring(), tick, prevTick, crop, cw, ch);
                     prevTick = tick;
                 }
             }
@@ -1174,7 +1614,8 @@ namespace
         }
 
         // قراءة جديدة: نفس الجملة؟ جملة جديدة؟ ولا اختفت؟
-        void OnReading(const std::wstring& text, ULONGLONG tick, ULONGLONG prevTick)
+        void OnReading(const std::wstring& text, ULONGLONG tick, ULONGLONG prevTick,
+                       const std::vector<uint8_t>& crop, int cw, int ch)
         {
             TranslateProfile prof;
             const bool haveProf = GetTranslateProfile(m_id, prof);
@@ -1184,14 +1625,40 @@ namespace
             {
                 if (cur) cur->end = tick;                        // الجملة اختفت
             }
-            else if (cur && Similarity(cur->en, text) >= 0.72)   // نفس الجملة (يمكن بغلطة قراءة)
+            else if (cur && (Similarity(cur->en, text) >= 0.72 || Grows(cur->en, text)))   // نفس الجملة (أو عم تكمل)
             {
                 ++cur->seen;
-                if (!cur->requested)
+                // تغيّرت؟ (فرق حرف بغلطة قراءة ما بيحسب)
+                const std::wstring k = Key(text), kl = Key(cur->last);
+                const bool steady = k == kl || (k.size() <= kl.size() + 1 && Similarity(cur->last, text) >= 0.97);
+                if (!steady)
+                    cur->changed = tick;
+                cur->last = text;
+                const bool retranslate = !haveProf || prof.retranslate;
+                if (k.size() > Key(cur->en).size() && (!cur->requested || retranslate))   // القراءة الأكمل (الجملة عم تنكتب)
                 {
-                    if (text.size() > cur->en.size()) cur->en = text;   // القراءة الأكمل
-                    if (cur->seen >= 2)
-                        Request(*cur, prof, haveProf);
+                    cur->en = text;
+                    if (cur->requested)                       // انترجمت منقوصة: منرجع نترجمها كاملة
+                    {
+                        cur->requested = false;
+                        cur->stale = true;
+                        cur->failed = false;
+                    }
+                }
+                // منستنى الجملة توقف عن التغيّر (الإعداد "انتظار اكتمال الجملة")،
+                // وإذا القارئ عم يرجف وما بتوقف أبداً: بعد 6 ثواني (أو 3 أضعاف الانتظار) منترجم شو ما كان
+                const ULONGLONG settle = (ULONGLONG)std::max(0, haveProf ? prof.settleMs : 600);
+                const ULONGLONG giveUp = std::max<ULONGLONG>(6000, settle * 3);
+                if (!cur->requested && cur->seen >= 2 && (tick - cur->changed >= settle || tick - cur->start >= giveUp))
+                {
+                    // قراءة الصورة: منحفظ صورة الجملة هلق (كاملة) لنبعتها للخدمة
+                    if (haveProf && prof.visionRead && EngineSeesImages(prof.engine) && cw > 8 && ch > 8)
+                    {
+                        cur->image  = std::make_shared<const std::vector<uint8_t>>(crop.begin(), crop.begin() + (size_t)cw * ch * 4);
+                        cur->imageW = cw;
+                        cur->imageH = ch;
+                    }
+                    Request(*cur, prof, haveProf);
                 }
             }
             else                                                  // جملة جديدة
@@ -1201,10 +1668,13 @@ namespace
                 // بلّشت بين القراءة اللي قبل وهي: منبلّش المربع من القراءة اللي قبل (أبكر شوي أحسن من إنو يبيّن الإنكليزي)
                 e.start = prevTick && prevTick < tick ? prevTick + 1 : tick;
                 e.en    = text;
+                e.last  = text;
+                e.changed = tick;
                 if (cur) cur->end = e.start;
                 m_events.push_back(e);
             }
-            if (!text.empty())
+            // مع قراءة الصورة: "يقرأ الآن" بيبيّن قراءة الخدمة (الأدق) لما توصل
+            if (!text.empty() && !(haveProf && prof.visionRead && EngineSeesImages(prof.engine)))
                 m_status.lastEnglish = text;
             // منرمي الجمل القديمة (أكتر من دقيقتين)
             const ULONGLONG now = Now();
@@ -1223,8 +1693,9 @@ namespace
                 auto it = m_cache.find(CacheKey(prof, e.en));
                 if (it != m_cache.end())               // مترجمة من قبل: فوراً وبلا إنترنت
                 {
-                    e.ar   = it->second;
-                    e.done = true;
+                    e.ar    = it->second;
+                    e.done  = true;
+                    e.stale = false;
                     ++m_status.fromCache;
                     m_status.lastArabic = e.ar;
                     return;
@@ -1240,6 +1711,8 @@ namespace
             {
                 uint64_t id = 0;
                 std::wstring en;
+                std::shared_ptr<const std::vector<uint8_t>> image;
+                int imageW = 0, imageH = 0;
                 std::vector<std::pair<std::wstring, std::wstring>> context;
                 {
                     std::unique_lock<std::mutex> lock(m_mx);
@@ -1247,11 +1720,14 @@ namespace
                     if (!m_running || g_shutdown)
                         break;
                     for (Event& e : m_events)
-                        if (e.requested && !e.done && !e.failed && !e.inflight)
+                        if (e.requested && (!e.done || e.stale) && !e.failed && !e.inflight)
                         {
                             e.inflight = true;
                             id = e.id;
                             en = e.en;
+                            image = e.image;
+                            imageW = e.imageW;
+                            imageH = e.imageH;
                             break;
                         }
                     if (!id)
@@ -1263,11 +1739,17 @@ namespace
                 }
 
                 TranslateProfile prof;
-                std::wstring ar, err;
+                std::wstring ar, err, readEn;
                 bool limited = false, ok = false;
                 const ULONGLONG t0 = Now();
                 if (GetTranslateProfile(m_id, prof))
-                    ok = CallEngine(prof, GetEngineConfig(prof.engine), en, context, ar, err, &limited);
+                {
+                    // قراءة الصورة بالذكاء الصناعي (الأدق) ، وإذا فشلت: النص من قارئ ويندوز
+                    if (image && prof.visionRead && EngineSeesImages(prof.engine))
+                        ok = CallVision(prof, GetEngineConfig(prof.engine), *image, imageW, imageH, context, readEn, ar, err, &limited);
+                    if (!ok && !limited)
+                        ok = CallEngine(prof, GetEngineConfig(prof.engine), en, context, ar, err, &limited);
+                }
                 else
                     err = L"الملف الشخصي غير موجود";
                 if (g_shutdown)
@@ -1280,14 +1762,23 @@ namespace
                         if (e.id == id)
                         {
                             e.inflight = false;
-                            if (ok) { e.ar = ar; e.done = true; }
-                            else    e.failed = true;
+                            if (ok)
+                            {
+                                e.ar    = ar;
+                                e.done  = true;
+                                e.stale = Key(e.en) != Key(en);    // كبرت وهي عم تنترجم: بدها جولة كمان
+                            }
+                            else if (!e.done)
+                                e.failed = true;                    // (إذا في ترجمة قبلها منخلّيها)
+                            else
+                                e.stale = false;
                         }
                     m_status.lastMs = (int)(Now() - t0);
                     if (ok)
                     {
                         ++m_status.translated;
                         m_status.lastArabic = ar;
+                        m_status.lastEnglish = readEn.empty() ? en : readEn;
                         m_status.error.clear();
                         m_cache[key] = ar;
                     }
@@ -1595,7 +2086,8 @@ std::shared_ptr<const MediaFrame> TranslationLayerFrame(const SceneLayer& layer,
     Event e;
     std::wstring text;
     bool dim = false;
-    if (s->EventAt(t, e) && e.requested && !e.failed)
+    // جملة حقيقية (انقرت مرتين) حتى لو لسا عم تنكتب: منغطّي الإنكليزي
+    if (s->EventAt(t, e) && (e.requested || e.seen >= 2) && !e.failed)
     {
         if (e.done && !e.ar.empty()) text = e.ar;
         else                         { text = L"…"; dim = true; }   // الترجمة لسا ما وصلت: منغطّي الإنكليزي
@@ -1630,4 +2122,9 @@ std::shared_ptr<const MediaFrame> RenderTranslationBox(const std::wstring& text,
     std::shared_ptr<const MediaFrame> f = RenderOverlay(text, W, H, p, dim);
     g_rendered[key] = f;
     return f;
+}
+
+bool GrabScreenArea(const RECT& r, std::vector<uint8_t>& bgra, int& width, int& height, int maxWidth)
+{
+    return GrabScreen(r, bgra, width, height, maxWidth);
 }

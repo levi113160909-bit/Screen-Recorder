@@ -228,6 +228,8 @@ void SaveScenes()
         fwprintf(f, L"S\t%ls\t%u\t%u\n", Clean(s.name).c_str(), s.hotkey.mods, s.hotkey.vk);
         for (const SceneLayer& l : s.layers)
         {
+            if (l.kind == LayerKind::Translation && l.source == SCREEN_TRANSLATE_SOURCE)
+                continue;                           // ترجمة الشاشة: طبقة مؤقتة ما بتنحفظ
             if (l.kind != LayerKind::Capture)       // كاميرا / صورة / نص
             {
                 fwprintf(f, L"M\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%d\t%d\t%u\t%d\t%ls\t%ls\t%.5f\t%.5f\t%.5f\t%.5f\t%d\t%u\t%.3f\t%.3f\t%.3f\t%d\t%d\t%d\t%ls\n",

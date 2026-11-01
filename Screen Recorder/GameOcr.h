@@ -16,6 +16,13 @@
 #include <string>
 #include <vector>
 
+// سطر مع مكانه بالصورة (بكسل الصورة الأصلية)
+struct OcrLineBox
+{
+    std::wstring text;
+    float        x = 0, y = 0, w = 0, h = 0;
+};
+
 class OcrReader
 {
 public:
@@ -30,6 +37,9 @@ public:
 
     // صورة BGRA (من فوق لتحت). بيرجّع الأسطر من فوق لتحت
     bool Read(const uint8_t* bgra, int width, int height, int stride, std::vector<std::wstring>& lines);
+
+    // متل Read بس مع مكان كل سطر (لترجمة الشاشة كلها). الصورة الكبيرة بتتصغّر لحالها
+    bool ReadLines(const uint8_t* bgra, int width, int height, int stride, std::vector<OcrLineBox>& lines);
 
 private:
     struct Impl;

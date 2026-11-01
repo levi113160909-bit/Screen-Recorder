@@ -69,6 +69,7 @@
 #include "Translator.h"
 #include "TranslationPanel.h"
 #include "PlayerOverlay.h"
+#include "ScreenTranslate.h"
 #include <shobjidl.h>
 #include <commdlg.h>
 #include <wincrypt.h>
@@ -461,6 +462,12 @@ void OpenTranslationPanel(int layerId);
 void ToggleTranslationOverlay();     // الاختصار: الترجمة فوق اللعبة على شاشتك (تشغيل/إيقاف)
 // مكان طبقة الترجمة بالمشهد ، كنسبة من صورة المصدر (للترجمة على شاشتك: نفس مكان البث)
 bool TranslationLayerRegion(const TranslateProfile& p, double& rx, double& ry, double& rw, double& rh);
+
+// ---- ScreenTranslateControl.cpp: ترجمة الشاشة كلها بكبسة زر (لك وللجمهور) ----
+void ToggleScreenTranslate();        // الاختصار: ترجمة / إخفاء
+void UpdateScreenTranslateLayer();   // من مؤقّت الإطار: نافذتك ، الطبقة المؤقتة بالبث ، والإشعارات
+// ملف الترجمة المستعمل هلق: ملف طبقة الترجمة بالمشهد ، وإلا أول ملف
+bool ActiveTranslateProfile(TranslateProfile& out);
 void UpdateMediaDelays();
 
 // ---- AppTray.cpp: أيقونة جنب الساعة: الإخفاء والإظهار، قائمتها، والخروج ----

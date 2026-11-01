@@ -38,6 +38,9 @@ namespace
         ID_COLOR_FIRST   = ID_PANEL_USER + 252,    // TRANS_COLOR_COUNT
         ID_THRESHOLD     = ID_PANEL_USER + 260,
         ID_THRESHOLD_ON,
+        ID_SETTLE,
+        ID_RETRANSLATE,
+        ID_VISION,
         ID_ADD_SCENE     = ID_PANEL_USER + 270,
         ID_FIT,
         ID_CLEAR_CACHE,
@@ -538,11 +541,51 @@ float TranslationPanel::DrawPlayer(float y, float L, float R)
     return y + 26;
 }
 
+// ---- ترجمة الشاشة كلها ----
+float TranslationPanel::DrawScreenMode(float y, float L, float R)
+{
+    Text(L"٩. ترجمة الشاشة كلها", g_fBody.Get(), Rect(L, y, R, y + 26), Theme::Text);
+    y += 30;
+    const std::wstring key = m_h.screenHotkey ? m_h.screenHotkey() : std::wstring();
+    const D2D1_RECT_F card = Rect(L, y, R, y + 76);
+    Fill(card, WithAlpha(Theme::Accent, 0.10f), 10);
+    Text(key.empty() ? std::wstring(L"عيّن لها اختصارًا من نافذة «اختصارات لوحة المفاتيح»")
+                     : L"اضغط  " + LtrText(key) + L"  أثناء اللعب لترجمة كل نصوص الشاشة دفعة واحدة",
+         g_fBody.Get(), Rect(L + 14, y + 8, R - 14, y + 30), Theme::Text);
+    Text(L"القوائم والمهمات والرسائل ووصف الأغراض، كل نص بمكانه، لك وللمشاهدين",
+         g_fSmall.Get(), Rect(L + 14, y + 32, R - 14, y + 50), Theme::SubText);
+    Text(L"تختفي عند تغيّر الشاشة (مثل إغلاق القائمة) أو بالضغط مرة أخرى  •  تستخدم خدمة هذا الملف وأسماءه",
+         g_fSmall.Get(), Rect(L + 14, y + 52, R - 14, y + 70), Theme::SubText);
+    return y + 84;
+}
+
 // ---- قراءة النص ----
 float TranslationPanel::DrawReading(float y, float L, float R)
 {
     Text(L"٨. قراءة النص", g_fBody.Get(), Rect(L, y, R, y + 26), Theme::Text);
     y += 30;
+    // قراءة الصورة بالذكاء الصناعي (الأدق)
+    const bool sees = EngineSeesImages(m_p.engine);
+    y = ToggleRow(y, L, R, L"قراءة الصورة بالذكاء الاصطناعي (أدق بكثير)",
+                  sees ? std::wstring(L"تُرسل صورة مكان الترجمة إلى الخدمة فتقرأ النص وتترجمه معًا، حتى الخطوط الصغيرة والمزخرفة")
+                       : std::wstring(L"متاحة مع Gemini وClaude وChatGPT فقط  •  مع هذه الخدمة يُستخدم قارئ ويندوز"),
+                  m_p.visionRead && sees, ID_VISION);
+    // انتظار اكتمال الجملة (ألعاب بتكتب الكلام حرف حرف)
+    y = SliderRow(y, L, R, L"انتظار اكتمال الجملة", m_p.settleMs == 0 ? std::wstring(L"فورًا") : Seconds(m_p.settleMs),
+                  (float)m_p.settleMs, 0.0f, 3000.0f, 100.0f, ID_SETTLE,
+                  [this](float v) { m_p.settleMs = (int)std::lround(v); Apply(false); });
+    Text(L"لا تُترجم الجملة إلا بعد أن تتوقف عن التغيّر هذه المدة  •  زِدها إذا كانت اللعبة تكتب الكلام حرفًا حرفًا",
+         g_fSmall.Get(), Rect(L, y - 4, R, y + 16), Theme::SubText);
+    y += 20;
+    // التأخير لازم يكفي للانتظار + الترجمة ، وإلا الجمهور بيشوف الإنكليزي أول
+    if (!m_p.fromScreen && m_p.delayMs > 0 && m_p.delayMs < m_p.settleMs + 900)
+    {
+        Text(L"زِد «التأخير» في قسم المزامنة إلى " + Seconds(((m_p.settleMs + 900 + 99) / 100) * 100)
+             + L" على الأقل ليرى المشاهد العربية من أول لحظة", g_fSmall.Get(), Rect(L, y - 4, R, y + 16), Theme::Yellow);
+        y += 20;
+    }
+    y = ToggleRow(y, L, R, L"إعادة الترجمة إذا اكتملت الجملة بعد ترجمتها",
+                  L"تظهر الترجمة الأولى ثم تُستبدل بترجمة الجملة كاملة", m_p.retranslate, ID_RETRANSLATE);
     y = ToggleRow(y, L, R, L"فصل النص الفاتح عن الخلفية", L"جرّبه إذا كانت القراءة غير دقيقة فوق خلفيات مزدحمة",
                   m_p.threshold > 0, ID_THRESHOLD_ON);
     if (m_p.threshold > 0)
@@ -588,6 +631,7 @@ void TranslationPanel::DrawBody(float L, float top, float R)
     y = DrawLook(y + 6, L, R);
     y = DrawPlayer(y + 6, L, R);
     y = DrawReading(y + 6, L, R);
+    y = DrawScreenMode(y + 6, L, R);
 
     // ---- الأزرار ----
     Fill(Rect(L, y, R, y + 1), Theme::Border);
@@ -852,6 +896,10 @@ void TranslationPanel::OnClick(int id)
     case ID_SOFTEN:    m_p.soften = !m_p.soften; Apply(true); return;
     case ID_DELAY_ALL: m_p.delayAll = !m_p.delayAll; Apply(true); return;
     case ID_PLAYER_OVERLAY: m_p.playerOverlay = !m_p.playerOverlay; Apply(true); return;
+    case ID_RETRANSLATE:    m_p.retranslate = !m_p.retranslate; Apply(true); return;
+    case ID_VISION:
+        if (EngineSeesImages(m_p.engine)) { m_p.visionRead = !m_p.visionRead; Apply(true); }
+        return;
     case ID_THRESHOLD_ON:
         m_p.threshold = m_p.threshold > 0 ? 0 : 180;
         Apply(true);

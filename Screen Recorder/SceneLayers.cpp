@@ -201,6 +201,8 @@ void RemoveLayer(int id)
         {
             removed = g_scene.layers[i];
             g_scene.layers.erase(g_scene.layers.begin() + i);
+            if (removed.kind == LayerKind::Translation && removed.source == SCREEN_TRANSLATE_SOURCE)
+                StopScreenTranslate();              // شلت طبقة ترجمة الشاشة = إخفاء
         }
         if (g_selectedLayer == id)
             g_selectedLayer = 0;

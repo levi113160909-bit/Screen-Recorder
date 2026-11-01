@@ -320,6 +320,7 @@ const wchar_t* HotkeyManager::ActionName(int action)
     case HK_MARKER:        return L"وضع علامة أثناء التسجيل";
     case HK_PUSH_TO_TALK:  return L"اضغط لتتكلم (استمر بالضغط)";
     case HK_TRANSLATE_OVERLAY: return L"إظهار الترجمة فوق اللعبة على شاشتي / إخفاؤها";
+    case HK_SCREEN_TRANSLATE:  return L"ترجمة الشاشة كلها (القوائم والرسائل) / إخفاؤها";
     }
     return L"";
 }
@@ -334,6 +335,7 @@ HotkeyBinding HotkeyManager::Default(int action)
     case HK_REPLAY_SAVE: return { 0, VK_F7 };
     case HK_SCREENSHOT:  return { MOD_CONTROL, VK_F7 };
     case HK_MARKER:      return { MOD_CONTROL, VK_F9 };
+    case HK_SCREEN_TRANSLATE: return { MOD_CONTROL, VK_F6 };
     }
     return {};         // الباقي بلا اختصار بالأول
 }

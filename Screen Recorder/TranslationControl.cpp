@@ -118,6 +118,11 @@ void OpenTranslationPanel(int layerId)
         if (i < 0) return;
         profileId = g_scene.layers[i].source;
     }
+    if (profileId == SCREEN_TRANSLATE_SOURCE)        // طبقة ترجمة الشاشة المؤقتة: إعدادات الملف المستعمل
+    {
+        profileId = GetScreenTranslateInfo().profileId;
+        layerId = 0;
+    }
     TranslationPanelHooks h;
     h.devices  = [] { return SceneDevices(); };
     h.monitors = [] { return Monitors(); };
@@ -134,6 +139,7 @@ void OpenTranslationPanel(int layerId)
     h.busy       = [] { return Busy() || g_streamer.IsActive(); };
     h.addToScene = [](const std::wstring& id) { AddTranslationLayer(id); };
     h.fitLayer   = [](const std::wstring& id) { FitTranslationLayers(id); };
+    h.screenHotkey = [] { return HotkeyManager::Text(g_hotkeys.Get(HK_SCREEN_TRANSLATE)); };
     h.useProfile = [layerId](const std::wstring& id)
     {
         TranslateProfile p;
@@ -213,7 +219,11 @@ void ToggleTranslationOverlay()
     {
         std::lock_guard<std::mutex> lock(g_scene.mutex);
         for (const SceneLayer& l : g_scene.layers)
-            if (l.kind == LayerKind::Translation && !l.source.empty()) { want.push_back(l.source); break; }
+            if (l.kind == LayerKind::Translation && !l.source.empty() && l.source != SCREEN_TRANSLATE_SOURCE)
+            {
+                want.push_back(l.source);
+                break;
+            }
     }
     if (want.empty())
         want.push_back(all.front().id);

@@ -31,6 +31,7 @@ constexpr int TRANS_ENGINE_COUNT = (int)TransEngine::Count;
 const wchar_t* EngineName(TransEngine e);        // "Gemini (Google)"
 const wchar_t* EngineNote(TransEngine e);        // سطر صغير: مجاني؟ دقيق؟
 bool           EngineIsAi(TransEngine e);        // بيفهم السياق واللهجة والأسماء
+bool           EngineSeesImages(TransEngine e);  // بيقرا الصور (Gemini ، Claude ، ChatGPT)
 bool           EngineNeedsKey(TransEngine e);
 bool           EngineHasModel(TransEngine e);
 bool           EngineHasExtra(TransEngine e);    // Azure: المنطقة ، Ollama: العنوان
@@ -86,6 +87,14 @@ struct TranslateProfile
 
     // القراءة: فصل النص الفاتح عن الخلفية (0 = بلا ، 120..250 = الحد)
     int          threshold = 0;
+    // انتظار اكتمال الجملة: منترجم بس لما النص يوقف عن التغيّر هالقد (ملّي ثانية)
+    // (ألعاب بتكتب الكلام حرف حرف). وإذا كبرت بعد الترجمة: retranslate = منرجع نترجمها كاملة
+    int          settleMs = 600;
+    bool         retranslate = true;
+    // قراءة الصورة بالذكاء الصناعي: منبعت صورة مكان الترجمة نفسها للخدمة ، فبتقراها وبتترجمها مع بعض
+    // (أدق بكتير من قارئ ويندوز مع الخطوط الصغيرة والمزخرفة). قارئ ويندوز بيضل بس ليعرف إمتى طلعت جملة جديدة
+    // متاحة مع Gemini و Claude و ChatGPT
+    bool         visionRead = true;
 
     // الشكل
     float        fontScale  = 1.0f;
@@ -147,6 +156,16 @@ bool TranslateLiveLine(const std::wstring& profileId, std::wstring& arabic);
 // صورة مربع الترجمة بهالحجم (BGRA مضروبة بالشفافية ، متل اللي بالبث). محفوظة: لا تعدّلها
 std::shared_ptr<const MediaFrame> RenderTranslationBox(const std::wstring& text, int width, int height,
                                                        const TranslateProfile& p, bool dim);
+
+// ---------- ترجمة الشاشة كلها (ScreenTranslate) ----------
+struct ScreenTextItem
+{
+    std::wstring en, ar;      // ar فاضي = ما انترجم
+};
+// كل نصوص الشاشة بطلب واحد (والمترجم من قبل من الذاكرة). بتوقّف الخيط: نادِها من خيط بالخلفية
+bool TranslateScreenTexts(const TranslateProfile& p, std::vector<ScreenTextItem>& items, std::wstring& error);
+// صورة جزء من الشاشة (maxWidth > 0: مصغّرة لهالعرض). النوافذ المخفية عن التصوير ما بتطلع فيها
+bool GrabScreenArea(const RECT& r, std::vector<uint8_t>& bgra, int& width, int& height, int maxWidth);
 
 // البرنامج عم يسكّر: وقّف كل الخيوط
 void ShutdownTranslator();

@@ -12,6 +12,7 @@
 //   - الشكل
 //   - الترجمة على شاشتك (فوق اللعبة إلك إنت)
 //   - قراءة النص
+//   - ترجمة الشاشة كلها (شرح واختصارها)
 // =============================================================
 #pragma once
 #include "Panel.h"
@@ -29,6 +30,7 @@ struct TranslationPanelHooks
     std::function<void(const std::wstring& id)>    addToScene;    // إضافة طبقة ترجمة بهالملف
     std::function<void(const std::wstring& id)>    fitLayer;      // ترجع الطبقة فوق مكان الترجمة
     std::function<void(const std::wstring& id)>    useProfile;    // الطبقة صارت تستعمل هالملف
+    std::function<std::wstring()>                  screenHotkey;  // اختصار "ترجمة الشاشة كلها" (فاضي = بلا)
 };
 
 class TranslationPanel : public Panel
@@ -63,6 +65,7 @@ private:
     float DrawLook(float y, float L, float R);
     float DrawPlayer(float y, float L, float R);
     float DrawReading(float y, float L, float R);
+    float DrawScreenMode(float y, float L, float R);
     float ToggleRow(float y, float L, float R, const std::wstring& label, const std::wstring& sub, bool on, int id);
     void  RunTest();
 

@@ -2,6 +2,7 @@
 //  Media.cpp - الكاميرا (Media Foundation) والصور (WIC) والنص (DirectWrite)
 // =============================================================
 #include "Media.h"
+#include "ScreenTranslate.h"
 #include "BrowserSource.h"
 #include "Chroma.h"
 #include "Translator.h"
@@ -647,7 +648,10 @@ std::shared_ptr<const MediaFrame> GetLayerFrame(const SceneLayer& layer, bool* m
     {
     case LayerKind::Camera: return ApplyChroma(layer, CameraFrame(layer.source, -1, g_cameraDelayMs, missing));
     case LayerKind::Device: return CameraFrame(layer.source, std::clamp(layer.mode, 0, 4), g_deviceDelayMs, missing);
-    case LayerKind::Translation: return TranslationLayerFrame(layer, missing);
+    case LayerKind::Translation:
+        if (layer.source == SCREEN_TRANSLATE_SOURCE)          // ترجمة الشاشة كلها (طبقة مؤقتة)
+            return ScreenTranslateLayerFrame();
+        return TranslationLayerFrame(layer, missing);
     case LayerKind::Image:  return ImageFrame(layer.source, missing);
     case LayerKind::Text:   return TextFrame(layer);
     case LayerKind::Web:    return BrowserFrame(layer.source, layer.srcW, layer.srcH, missing);
